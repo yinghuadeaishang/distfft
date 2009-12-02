@@ -34,7 +34,7 @@ int main(int argc, char *argv[])
   }
 
   // Allocate the FFT destination array
-  complex double *fft = fftw_malloc(N*sizeof(complex double));
+  double complex *fft = fftw_malloc(N*sizeof(double complex));
   if(fft == NULL) {
     fprintf(stdout, "unable to allocate fft vector\n");
     goto skip_deallocate_fft;
@@ -52,7 +52,7 @@ int main(int argc, char *argv[])
   fft_r2c_1d_finish(fft, N);
 
   // Allocate the reverse FFT destination array
-  complex double *dst = fftw_malloc(N*sizeof(complex double));
+  double complex *dst = fftw_malloc(N*sizeof(double complex));
   if(dst == NULL) {
     fprintf(stdout, "unable to allocate dst vector\n");
     goto skip_deallocate_dst;

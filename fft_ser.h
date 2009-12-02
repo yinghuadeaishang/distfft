@@ -10,6 +10,6 @@
  * takes a pointer to the resulting buffer and the number of elements in the
  * buffer, and computes the remaining values.
  */
-void fft_r2c_1d_finish(complex double *v, size_t n);
+void fft_r2c_1d_finish(double complex *v, size_t n);
 
 #endif /* HEADER_FFT_SER_INCLUDED */
