@@ -4,8 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include "dSFMT/dSFMT.h"
 #include <fftw3.h>
+#include "dSFMT/dSFMT.h"
+#include "fft_ser.h"
 
 static const size_t N = 1355;
 static const uint32_t SEED = 2323;
@@ -48,9 +49,7 @@ int main(int argc, char *argv[])
   fftw_execute(fwd_plan);
 
   // Fill in the rest of the destination values using the Hermitian property.
-  for(unsigned int i = N/2 + 1; i < N; ++i) {
-    fft[i] = conj(fft[N - i]);
-  }
+  fft_r2c_1d_finish(fft, N);
 
   // Allocate the reverse FFT destination array
   complex double *dst = fftw_malloc(N*sizeof(complex double));
