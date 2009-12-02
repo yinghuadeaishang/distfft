@@ -45,6 +45,6 @@ PKG_PROG_PKG_CONFIG
 PKG_CHECK_MODULES(fftw3, [fftw3 >= 3], [], AC_MSG_ERROR([cannot find fftw3.]))
 
 AC_CONFIG_HEADERS([config.h])
-AC_CONFIG_FILES([Makefile dSFMT/Makefile])
+AC_CONFIG_FILES([Makefile dSFMT/Makefile tests/Makefile])
 AC_CONFIG_FILES([dSFMT/compare_output.sh], [chmod +x dSFMT/compare_output.sh])
 AC_OUTPUT

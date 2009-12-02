@@ -1,6 +1,6 @@
 AUTOMAKE_OPTIONS = foreign
 
-SUBDIRS = dSFMT
+SUBDIRS = dSFMT tests
 
 bin_PROGRAMS = ssfllg
 
