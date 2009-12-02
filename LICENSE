@@ -1,3 +1,8 @@
+This license covers all the source code of this program except for the double
+precision SIMD Fast Mersenne Twister, consisting of the files in dSFMT. The
+double precision SIMD Fast Mersenne Twister is licensed under the terms
+contained in dSFMT/LICENSE.
+
 Copyright (c) 2009, Matthew William Cox
 All rights reserved.
 

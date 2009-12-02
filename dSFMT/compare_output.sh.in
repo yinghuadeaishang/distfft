@@ -1,0 +1,2 @@
+#!/bin/sh
+./dsfmt_test | diff -wq $srcdir/dSFMT.@MTEXP@.out.txt - >/dev/null

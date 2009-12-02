@@ -1,5 +1,7 @@
 AUTOMAKE_OPTIONS = foreign
 
+SUBDIRS = dSFMT
+
 bin_PROGRAMS = ssfllg
 
 CC = @MPICC@
