@@ -40,11 +40,15 @@ AC_DEFINE_UNQUOTED([MTEXP], [$MTEXP], [Exponent to use for Mersenne Twister])
 dnl Check for SIMD
 AX_EXT
 
+dnl Count how many CPUs we have
+AX_COUNT_CPUS
+AC_SUBST([CPU_COUNT])
+
 dnl Check for packages
 PKG_PROG_PKG_CONFIG
 PKG_CHECK_MODULES(fftw3, [fftw3 >= 3], [], AC_MSG_ERROR([cannot find fftw3.]))
 
 AC_CONFIG_HEADERS([config.h])
-AC_CONFIG_FILES([Makefile dSFMT/Makefile tests/Makefile])
+AC_CONFIG_FILES([Makefile dSFMT/Makefile tests/Makefile par_tests/Makefile])
 AC_CONFIG_FILES([dSFMT/compare_output.sh], [chmod +x dSFMT/compare_output.sh])
 AC_OUTPUT

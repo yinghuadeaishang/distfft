@@ -1,0 +1,62 @@
+#ifndef HEADER_FFT_PAR_INCLUDED
+#define HEADER_FFT_PAR_INCLUDED
+
+#include <complex.h>
+#include <stddef.h>
+#include <mpi.h>
+
+//! An opaque pointer type hiding the details of a parallel Fourier transform.
+/*! Values of this type are obtained from the <tt>fft_par_plan_*</tt> methods,
+ *  which allocate the necessary storage and MPI structures for executing the
+ *  transform.
+ *
+ *  Any plan created by the user should be destroyed using
+ *  fft_par_plan_destroy(fft_par_plan) to release system resources.
+ */
+typedef struct fft_par_plan_s *fft_par_plan;
+
+//! Create a plan to compute a parallel one dimensional fourier transform.
+/*! Create a plan to compute a one dimensional fourier transform of data which
+ *  is distributed across several processors.
+ *
+ *  This is a collective operation: all processors in the communicator should
+ *  call this function with the same arguments for <tt>nelems</tt>.
+ *
+ *  This function can encounter errors from two sources: the MPI system or
+ *  memory allocation. If there is any problem creating the plan, then
+ *  <tt>NULL</tt> is returned. If the <tt>err</tt> parameter is not
+ *  <tt>NULL</tt>, it is taken as the location to store the MPI return status.
+ *  If this function returns null, and <tt>MPI_SUCCESS</tt> was returned in
+ *  <tt>err</tt> then the error was due to a failure to allocate memory.
+ *
+ *  \param comm The communicator consisting of the nodes over which the data is
+ *  distributed.
+ *  \param nelems The number of elements on each processor.
+ *  \param src The source array
+ *  \param dst The destination array
+ *  \param err The return status from the MPI system.
+ *  \return A new plan, or <tt>NULL</tt> if there was an error creating the plan.
+ */
+fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, size_t nelems, double *src,
+     double complex *dst, int *err);
+
+//! Execute a plan
+/*! Accept a reference to a previously created plan and execute it on the data
+ *  provided.
+ *
+ *  \param plan The plan to execute
+ *  \return The MPI status code
+ */
+int fft_par_execute(fft_par_plan);
+
+//! Destroy a plan for computing parallel fourier transforms.
+/*! The plans contain buffers and other system resources which need to be
+ *  freed. Any plan allocation should be matched with this function to
+ *  deallocate the plan when finished.
+ *
+ *  \param plan The plan to destroy.
+ *  \return The return status from the underlying MPI system.
+ */
+int fft_par_plan_destroy(fft_par_plan plan);
+
+#endif /* HEADER_FFT_PAR_INCLUDED */
