@@ -82,10 +82,22 @@ int main(int argc, char **argv)
     goto die_free_master;
   }
 
+  if(MPI_SUCCESS != MPI_Barrier(MPI_COMM_WORLD)) {
+    fprintf(stderr, "unable to synchronize processes.\n");
+    goto die_free_master;
+  }
+
+  // Time the serial fft.
+  double start_time = MPI_Wtime();
+
   // Compute the serial fft for comparison purposes
   if(do_serial_fft(total_elems, master, serial) != SUCCESS) {
     fprintf(stderr, "unable to perform serial fft\n");
     goto die_free_serial;
+  }
+  if(rank == 0) {
+    printf("elapsed time for serial fft: %g\n", MPI_Wtime() - start_time);
+    fflush(stdout);
   }
 
   // Allocate space for the parallel fft solution.
@@ -95,9 +107,20 @@ int main(int argc, char **argv)
     goto die_free_serial;
   }
 
+  // Time the parallel fft.
+  if(MPI_SUCCESS != MPI_Barrier(MPI_COMM_WORLD)) {
+    fprintf(stderr, "unable to synchronize processes.\n");
+    goto die_free_serial;
+  }
+  start_time = MPI_Wtime();
+
   if(do_parallel_fft(master + rank*proc_elems, parallel) != SUCCESS) {
     fprintf(stderr, "unable to perform parallel fft\n");
     goto die_free_parallel;
+  }
+  if(rank == 0) {
+    printf("elapsed time for parallel fft: %g\n", MPI_Wtime() - start_time);
+    fflush(stdout);
   }
 
   /* Verify the serial computation against our parallel computation. Use the
