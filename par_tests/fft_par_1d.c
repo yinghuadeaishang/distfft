@@ -30,7 +30,7 @@ int main(int argc, char **argv)
     // Theoretically, an error at this point will abort the program, and this
     // code path is never followed. This is here for completeness.
     fprintf(stderr, "unable to initialize MPI\n");
-    goto fail_immed;
+    goto die_immed;
   }
 
   // Install the MPI error handler that returns error codes, so we can perform
@@ -40,20 +40,20 @@ int main(int argc, char **argv)
     // Again, theoretically, the previous error handler (MPI_Abort) gets called
     // instead of reaching this fail point.
     fprintf(stderr, "unable to reset MPI error handler\n");
-    goto fail_finalize_mpi;
+    goto die_finalize_mpi;
   }
 
   int size, rank;
   if(MPI_Comm_size(MPI_COMM_WORLD, &size) != MPI_SUCCESS ||
       MPI_Comm_rank(MPI_COMM_WORLD, &rank) != MPI_SUCCESS) {
     fprintf(stderr, "unable to determine rank and size\n");
-    goto fail_finalize_mpi;
+    goto die_finalize_mpi;
   }
 
   dsfmt_t *prng = malloc(sizeof(dsfmt_t));
   if(prng == NULL) {
     fprintf(stderr, "unable to allocate PRNG\n");
-    goto fail_finalize_mpi;
+    goto die_finalize_mpi;
   }
   dsfmt_init_gen_rand(prng, SEED + rank);
 
@@ -63,7 +63,7 @@ int main(int argc, char **argv)
   double *master = fftw_malloc(total_elems*sizeof(double));
   if(master == NULL) {
     fprintf(stderr, "unable to allocate master array\n");
-    goto fail_free_prng;
+    goto die_free_prng;
   }
   for(unsigned int i = 0; i < total_elems; ++i) {
     master[i] = dsfmt_genrand_open_close(prng) * 10;
@@ -72,51 +72,62 @@ int main(int argc, char **argv)
   if(MPI_SUCCESS != MPI_Bcast(master, total_elems, MPI_DOUBLE, 0,
         MPI_COMM_WORLD)) {
     fprintf(stderr, "unable to synchronize master array.\n");
-    goto fail_free_master;
+    goto die_free_master;
   }
 
   // Allocate destinarion array for serial array.
   double complex *serial = fftw_malloc(total_elems*sizeof(double complex));
   if(serial == NULL) {
     fprintf(stderr, "unable to allocate serial array\n");
-    goto fail_free_master;
+    goto die_free_master;
   }
 
   // Compute the serial fft for comparison purposes
   if(do_serial_fft(total_elems, master, serial) != SUCCESS) {
     fprintf(stderr, "unable to perform serial fft\n");
-    goto fail_free_serial;
+    goto die_free_serial;
   }
 
   // Allocate space for the parallel fft solution.
   double complex *parallel = fftw_malloc(proc_elems*sizeof(double complex));
   if(parallel == NULL) {
     fprintf(stderr, "unable to allocate parallel array\n");
-    goto fail_free_serial;
+    goto die_free_serial;
   }
 
   if(do_parallel_fft(master + rank*proc_elems, parallel) != SUCCESS) {
     fprintf(stderr, "unable to perform parallel fft\n");
-    goto fail_free_parallel;
+    goto die_free_parallel;
   }
 
-  // Error handling scheme changes here: now we have succeeded unless a
-  // cleanup function chokes and dies.
-  ret = EXIT_SUCCESS;
-fail_free_parallel:
+  /* Verify the serial computation against our parallel computation. Use the
+   * sup norm to see if the error is within tolerance.
+   */
+  double sup = 0.0;
+  for(int i = 0; i < proc_elems; ++i) {
+    sup = fmax(sup, cabs(parallel[i] - serial[rank*proc_elems + i]));
+  }
+  if(sup < 1.0e-6) {
+    ret = EXIT_SUCCESS;
+  }
+
+  /* Error handling scheme changes here: now we have succeeded unless a cleanup
+   * function chokes and dies.
+   */
+die_free_parallel:
   fftw_free(parallel);
-fail_free_serial:
+die_free_serial:
   fftw_free(serial);
-fail_free_master:
+die_free_master:
   fftw_free(master);
-fail_free_prng:
+die_free_prng:
   free(prng);
-fail_finalize_mpi:
+die_finalize_mpi:
   if(MPI_Finalize() != MPI_SUCCESS) {
     fprintf(stderr, "unable to finalize MPI\n");
     ret = EXIT_FAILURE;
   }
-fail_immed:
+die_immed:
   fftw_cleanup();
   return ret;
 }

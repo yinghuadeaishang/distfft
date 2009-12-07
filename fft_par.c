@@ -1,4 +1,5 @@
 #include <complex.h>
+#include <math.h>
 #include <stdlib.h>
 #include <fftw3.h>
 #include "fft_par.h"
@@ -57,6 +58,38 @@ int cycle_data_parameter_fill(fft_par_plan plan);
  */
 int swizzle_data_parameter_fill(fft_par_plan plan);
 
+//! Apply the twiddle factors to the intermediate data within a plan.
+/*! In order to compose two smaller length fourier transforms into a fourier
+ *  transform of a larger composite data set, we need to multiply twiddle
+ *  factors onto the result of the inner fourier transform before performing
+ *  the outer fourier transform. This routine multiplies the data in the
+ *  outersrc array by the appropriate complex values.
+ *
+ *  \param plan The plan owning the outersrc array to apply twiddle factors to.
+ */
+void apply_twiddle_factors(fft_par_plan plan)
+{
+  /* The work units are arranged across the processors cyclically:
+   * 0: 0, p, 2p, ...
+   * 1: 1, p+1, 2p+1, ..
+   * 2: 2, p+2, 2p+2, ..
+   * ...
+   * p-1: p-1, p + p - 1, 2p + p - 1...
+   *
+   * Each work unit needs to be multiplied by a twiddle factor which is exactly
+   * the root of unity of the number of elements in the entire fourier
+   * transform to the power of the product of the work unit, to the power of
+   * its index within the work unit.
+   */
+  const double complex w0 = cexp(-2*M_PI*I/(plan->nprocs*plan->nelems));
+  for(int wu = 0; wu < plan->outerjobs[plan->rank]; ++wu) {
+    for(int i = 0; i < plan->nprocs; ++i) {
+      ((double complex *)plan->outersrc)[wu*plan->nprocs + i] *=
+        cpow(w0, i*(wu*plan->nprocs + plan->rank));
+    }
+  }
+}
+
 fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, size_t const nelems,
     double * const src, double complex * const dst, int * const errloc)
 {
@@ -110,8 +143,8 @@ fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, size_t const nelems,
       plan->innerdst, FFTW_ESTIMATE);
   if(plan->innerplan == NULL) goto fail_free_outerdst;
 
-  plan->outerplan = fftw_plan_dft_1d(nelems, plan->outersrc, plan->outerdst,
-      FFTW_FORWARD, FFTW_ESTIMATE);
+  plan->outerplan = fftw_plan_dft_1d(plan->nprocs, plan->outersrc,
+      plan->outerdst, FFTW_FORWARD, FFTW_ESTIMATE);
   if(plan->outerplan == NULL) goto fail_free_innerplan;
 
   plan->cyc_sd = malloc(sizeof(int)*plan->nprocs);
@@ -246,37 +279,32 @@ int fft_par_execute(fft_par_plan plan)
   err = MPI_Alltoallw(plan->src, plan->ones, plan->cyc_sd, plan->cyc_st,
       plan->innersrc, plan->ones, plan->cyc_rd, plan->cyc_rt, plan->comm);
   if (err != MPI_SUCCESS) goto fail_immed;
-  printf("src %d:", plan->rank);
-  for(int i = 0; i < plan->nelems; ++i) printf(" %4g", ((double *)plan->src)[i]);
-  printf("\n");
-  printf("innersrc %d:", plan->rank);
-  for(int i = 0; i < plan->nelems; ++i) printf(" %4g", ((double *)plan->innersrc)[i]);
-  printf("\n");
-  fflush(stdout);
   // Stage two: inner fft
   fftw_execute(plan->innerplan);
   fft_r2c_1d_finish(plan->innerdst, plan->nelems);
-  printf("innerdst %d:", plan->rank);
-  for(int i = 0; i < plan->nelems; ++i) {
-    printf(" (%4g,%4g)", creal(((double complex *)plan->innerdst)[i]),
-        cimag(((double complex *)plan->innerdst)[i]));
-  }
-  printf("\n");
-  fflush(stdout);
   // Stage three: swizzle data
-  for(int i = 0; i < (plan->outerjobs[plan->rank]) * (plan->nprocs); ++i) {
-    *((double complex *)plan->outersrc + i) = 0.0;
-  }
   err = MPI_Alltoallw(plan->innerdst, plan->ones, plan->swiz_sd, plan->swiz_st,
       plan->outersrc, plan->ones, plan->swiz_rd, plan->swiz_rt, plan->comm);
   if(err != MPI_SUCCESS) goto fail_immed;
-  printf("outersrc %d:", plan->rank);
-  for(int i = 0; i < (plan->outerjobs[plan->rank]) * (plan->nprocs); ++i) {
-    printf(" (%4g, %4g)", creal(((double complex *)plan->outersrc)[i]),
-        cimag(((double complex *)plan->outersrc)[i]));
+  //Stage four: twiddle factors
+  apply_twiddle_factors(plan);
+  // Stage five: outer fft
+  for(int w = 0; w < plan->outerjobs[plan->rank]; ++w) {
+    /* Execute the fft for each work unit. The use of fftw_execute_dft is
+     * fraught with peril, because we have to ensure we have the proper
+     * alignment for each block. The outersrc and outerdst buffers are
+     * allocated to 8 or 16 byte alignment, depending on the SIMD requirements
+     * of the platform.  The size of a double complex is 16 bytes, so each work
+     * unit is thus also 8 or 16 byte aligned.
+     */
+    fftw_execute_dft(plan->outerplan,
+        (double complex *)plan->outersrc + w*plan->nprocs,
+        (double complex *)plan->outerdst + w*plan->nprocs);
   }
-  printf("\n");
-  fflush(stdout);
+  // Stage six: rearrange data back to destination
+  // This is the reverse of the previous swizzling step
+  err = MPI_Alltoallw(plan->outerdst, plan->ones, plan->swiz_rd, plan->swiz_rt,
+      plan->dst, plan->ones, plan->swiz_sd, plan->swiz_st, plan->comm);
 fail_immed:
   return err;
 }
