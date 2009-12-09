@@ -37,12 +37,49 @@ typedef struct fft_par_plan_s *fft_par_plan;
  *  \param err The return status from the MPI system.
  *  \return A new plan, or <tt>NULL</tt> if there was an error creating the plan.
  */
-fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, size_t nelems, double *src,
+fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int nelems, double *src,
      double complex *dst, int *err);
+
+//! Create a plan to compute a distributed discrete fourier transform.
+/*! Create a plan to compute a discrete fourier transform of data which is
+ *  distributed across processors. The transform will be computed in parallel.
+ *
+ *  This is a collective operation: all processors in the communicator should
+ *  call this function with the same arguments for <tt>nelems</tt> and
+ *  <tt>len</tt>.
+ *
+ *  Errors can be obtained from two sources: the MPI system or memory
+ *  allocation. If there are any problems creating the plan, then <tt>NULL</tt>
+ *  will be returned. If the <tt>err</tt> parameter is not <tt>NULL</tt>, the
+ *  return code from the MPI operations are returned in this location. If the
+ *  function returns null, but <tt>MPI_SUCCESS</tt> is returned in the error
+ *  location, then the erro was do to a failure to allocate memory.
+ *
+ *  \param comm The communicator consisting of nodes over which the data is
+ *  distributed. This is assumed to have cartesian topology information attached
+ *  which reflects the distribution of data across the processors. In
+ *  particular, the number of dimensions in this transform is taken as the
+ *  rank of the transform (the number of dimensions).
+ *  \param size An array of the length of data in the corresponding direction
+ *  <i>on each processor.</i>
+ *  \param len The number of data elements which are to be transformed in
+ *  parallel. For example, if you are fourier transforming an array of
+ *  three-dimensional vectors, set this to three.
+ *  \param err The return status from the MPI system. If <tt>NULL</tt> is given,
+ *  then the MPI return status is not returned.
+ *  \return A new plan, or <tt>NULL</tt> if there was an error creating the
+ *  plan.
+ */
+fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size, int len,
+    double *src, double complex *dst, int *err);
 
 //! Execute a plan
 /*! Accept a reference to a previously created plan and execute it on the data
- *  provided.
+ *  provided when the plan was created.
+ *
+ *  This is a collective operation: all processors in the communicator should
+ *  call this function with the plan which they all obtained by synchronous
+ *  calls to <tt>fft_par_plan_r2c</tt>
  *
  *  \param plan The plan to execute
  *  \return The MPI status code

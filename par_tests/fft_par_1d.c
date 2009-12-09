@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <error.h>
+#include <math.h>
 #include <mpi.h>
 #include <fftw3.h>
 #include "dSFMT/dSFMT.h"
@@ -12,6 +13,7 @@
 
 const size_t proc_elems = 6;
 const uint32_t SEED = 42;
+const int TRIALS = 1;
 
 typedef enum {
   SUCCESS,
@@ -91,12 +93,14 @@ int main(int argc, char **argv)
   double start_time = MPI_Wtime();
 
   // Compute the serial fft for comparison purposes
-  if(do_serial_fft(total_elems, master, serial) != SUCCESS) {
-    fprintf(stderr, "unable to perform serial fft\n");
-    goto die_free_serial;
+  for(int t = 0; t < TRIALS; ++t) {
+    if(do_serial_fft(total_elems, master, serial) != SUCCESS) {
+      fprintf(stderr, "unable to perform serial fft\n");
+      goto die_free_serial;
+    }
   }
   if(rank == 0) {
-    printf("elapsed time for serial fft: %g\n", MPI_Wtime() - start_time);
+    printf("elapsed time for serial fft: %g\n", (MPI_Wtime() - start_time)/TRIALS);
     fflush(stdout);
   }
 
@@ -114,12 +118,14 @@ int main(int argc, char **argv)
   }
   start_time = MPI_Wtime();
 
-  if(do_parallel_fft(master + rank*proc_elems, parallel) != SUCCESS) {
-    fprintf(stderr, "unable to perform parallel fft\n");
-    goto die_free_parallel;
+  for(int t = 0; t < TRIALS; ++t) {
+    if(do_parallel_fft(master + rank*proc_elems, parallel) != SUCCESS) {
+      fprintf(stderr, "unable to perform parallel fft\n");
+      goto die_free_parallel;
+    }
   }
   if(rank == 0) {
-    printf("elapsed time for parallel fft: %g\n", MPI_Wtime() - start_time);
+    printf("elapsed time for parallel fft: %g\n", (MPI_Wtime() - start_time)/TRIALS);
     fflush(stdout);
   }
 
