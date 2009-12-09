@@ -7,7 +7,7 @@
 #include "dSFMT/dSFMT.h"
 #include "fft_par.h"
 
-const int nelems[2] = {7, 4};
+const int nelems[2] = {4, 7};
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 
@@ -129,7 +129,7 @@ int main(int argc, char **argv)
     fprintf(stderr, "unable to create master array\n");
     goto die_free_prng;
   }
-  
+
   /* Create a serial destination array */
   int P[2], per[2], loc[2];
   err = MPI_Cart_get(cart, 2, P, per, loc);
@@ -174,11 +174,24 @@ int main(int argc, char **argv)
     fprintf(stderr, "unable to allocate parallel source array\n");
     goto die_free_serial_plan;
   }
-  for(int r = 0; r < nelems[1]; ++r) {
-    for(int c = 0; c < nelems[0]; ++c) {
-      par_source[r*nelems[0] + c] = master[
-        ((r + loc[1]*nelems[1])*P[0] + loc[0])*nelems[0] + c];
+  for(int r = 0; r < nelems[0]; ++r) {
+    for(int c = 0; c < nelems[1]; ++c) {
+      par_source[r*nelems[1] + c] = master[
+        ((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1] + c];
     }
+  }
+  for(int i = 0; i < P[0]*P[1]; ++i) {
+    if(i == rank) {
+      for(int r = 0; r < nelems[0]; ++r) {
+        printf("src %d:%d", rank, r);
+        for(int c = 0; c < nelems[1]; ++c) {
+          printf(" %4.2f", par_source[r*nelems[1] + c]);
+        }
+        printf("\n");
+      }
+      fflush(stdout);
+    }
+    MPI_Barrier(cart);
   }
 
   /* Allocate the parallel destination array */
@@ -210,6 +223,22 @@ int main(int argc, char **argv)
   end_time = MPI_Wtime();
   if(rank == 0) {
     printf("average parallel time: %f\n", (end_time - start_time)/TRIALS);
+  }
+
+  MPI_Barrier(cart);
+  for(int i = 0; i < P[0]*P[1]; ++i) {
+    if(i == rank) {
+      for(int r = 0; r < nelems[0]; ++r) {
+        printf("parallel %d:%d", rank, r);
+        for(int c = 0; c < nelems[1]; ++c) {
+          printf(" (%4.2f,%4.2f)", creal(parallel[r*nelems[1] + c]),
+              cimag(parallel[r*nelems[1] + c]));
+        }
+        printf("\n");
+      }
+      fflush(stdout);
+    }
+    MPI_Barrier(cart);
   }
 
   /* Compare the two transforms to establish equality */

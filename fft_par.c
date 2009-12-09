@@ -12,22 +12,33 @@ struct fft_par_plan_s {
   void *outersrc;
   void *outerdst;
   void *dst;
+  /* Communication Displacements */
+  int *cycle_senddispls;
+  int *cycle_recvdispls;
+  /* Communication Types */
+  MPI_Datatype *cycle_sendtypes;
+  MPI_Datatype *cycle_recvtypes;
+  /* FFT Plans */
+  fftw_plan innerplan;
+  int *ones;
   int *map; /* [number of procs][ndims] location of each processor */
   int *outerjobs; /* [number of procs] Number of outer jobs on each processor */
-  int *nelems; /* Number of elements in each direction */
+  int *nelems; /* [ndims] Number of elements in each direction */
+  int *nprocs; /* [ndims] Number of processors in each direction */
   int ndims; /* How many dimensions there are */
+  int len; /* the vector length of the data */
   MPI_Comm comm;
 };
 
 //! Compute the send and receive offsets and types for a cyclic permutation.
 /*! Compute the send and receive offsets and types for a given processor which
- *  will be used by <tt>MPI_Alltoallw</tt> to perform a cyclic data
- *  permutation.  The cyc_[sr][dt] members of the plan structure should be
- *  initialized to arrays of at least plan->nprocs length, and the comm, and
- *  nelem members of the plan should be set to the values for the
- *  communication.
+ *  will be used by <tt>MPI_Alltoallw</tt> to perform a cyclic data permutation.
+ *  The comm, map, procs, ndims, nelem, and len members of the plan should be
+ *  set to the values for the communication.
  *
- *  \param plan The plan to write the cyc_[sr][dt] members of.
+ *  \param plan The plan to write the cyclic_{send,recv}{displ,type}s members
+ *  of. This function makes no attempt to avoid overwriting these values in case
+ *  of failure.
  *  \return The MPI return code
  */
 int cycle_data_parameter_fill(fft_par_plan plan);
@@ -177,9 +188,11 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   fft_par_plan plan = malloc(sizeof(struct fft_par_plan_s));
   if(plan == NULL) goto fail_immed;
 
+  plan->comm = comm;
   plan->ndims = ndims;
   plan->src = src;
   plan->dst = dst;
+  plan->len = len;
 
   /* The total number of data elements on each processor */
   int netlen = len; for(int i = 0; i < ndims; ++i) netlen *= size[i];
@@ -220,19 +233,52 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   if(plan->nelems == NULL) goto fail_free_map;
   for(int d = 0; d < ndims; ++d) plan->nelems[d] = size[d];
 
+  /* Copy the number of processors in each direction */
+  plan->nprocs = malloc(ndims*sizeof(int));
+  if(plan->nprocs == NULL) goto fail_free_nelems;
+  for(int d = 0; d < ndims; ++d) plan->nprocs[d] = proc_dim[d];
+
   /* Allocate the storage arrays */
   plan->innersrc = fftw_malloc(netlen*sizeof(double));
-  if(plan->innersrc == NULL) goto fail_free_nelems;
+  if(plan->innersrc == NULL) goto fail_free_nprocs;
   plan->innerdst = fftw_malloc(netlen*sizeof(double complex));
   if(plan->innerdst == NULL) goto fail_free_innersrc;
-  plan->outersrc = fftw_malloc(ojobs*nprocs*sizeof(double complex));
+  plan->outersrc = fftw_malloc(ojobs*len*nprocs*sizeof(double complex));
   if(plan->outersrc == NULL) goto fail_free_innerdst;
-  plan->outerdst = fftw_malloc(ojobs*nprocs*sizeof(double complex));
+  plan->outerdst = fftw_malloc(ojobs*len*nprocs*sizeof(double complex));
   if(plan->outerdst == NULL) goto fail_free_outersrc;
+
+  /* Allocate an array of ones to use in MPI_Alltoallw as the send count. The
+   * types encode all the information.
+   */
+  plan->ones = malloc(nprocs*sizeof(int));
+  if(plan->ones == NULL) goto fail_free_outerdst;
+  for(int i = 0; i < nprocs; ++i) plan->ones[i] = 1;
+
+  /* Initialize the cyclic communication types */
+  err = cycle_data_parameter_fill(plan);
+  if(err != MPI_SUCCESS) goto fail_free_ones;
+
+  plan->innerplan = fftw_plan_dft_r2c(ndims, size, plan->innersrc,
+      plan->innerdst, FFTW_ESTIMATE);
+  if(plan->innerplan == NULL) goto fail_free_swizzle_params;
 
   if(errloc != NULL) *errloc = err;
   return plan;
 
+fail_free_swizzle_params:
+//fail_free_cycle_params:
+  for(int i = 0; i < nprocs; ++i) {
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_sendtypes + i);
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_recvtypes + i);
+  }
+  free(plan->cycle_sendtypes);
+  free(plan->cycle_recvtypes);
+  free(plan->cycle_senddispls);
+  free(plan->cycle_recvdispls);
+fail_free_ones:
+  free(plan->ones);
+fail_free_outerdst:
   fftw_free(plan->outerdst);
 fail_free_outersrc:
   fftw_free(plan->outersrc);
@@ -240,6 +286,8 @@ fail_free_innerdst:
   fftw_free(plan->innerdst);
 fail_free_innersrc:
   fftw_free(plan->innersrc);
+fail_free_nprocs:
+  free(plan->nprocs);
 fail_free_nelems:
   free(plan->nelems);
 fail_free_map:
@@ -257,11 +305,26 @@ int fft_par_plan_destroy(fft_par_plan plan)
 {
   int err = MPI_SUCCESS;
 
+  int procs = 1; for(int d = 0; d < plan->ndims; ++d) procs *= plan->nprocs[d];
+
+  /* Free up MPI resources */
+  for(int i = 0; i < procs; ++i) {
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_sendtypes + i);
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_recvtypes + i);
+  }
+
   /* Free up memory buffers */
+  fftw_destroy_plan(plan->innerplan);
+  free(plan->cycle_recvdispls);
+  free(plan->cycle_recvtypes);
+  free(plan->cycle_senddispls);
+  free(plan->cycle_sendtypes);
+  free(plan->ones);
   fftw_free(plan->outerdst);
   fftw_free(plan->outersrc);
   fftw_free(plan->innerdst);
   fftw_free(plan->innersrc);
+  free(plan->nprocs);
   free(plan->nelems);
   free(plan->map);
   free(plan->outerjobs);
@@ -274,15 +337,20 @@ int fft_par_plan_destroy(fft_par_plan plan)
 int fft_par_execute(fft_par_plan plan)
 {
   int err = MPI_SUCCESS;
-  // for(int i = 0; i < plan->nelems; ++i) ((double *)plan->innersrc)[i] = -1.0;
-  // // Stage one: cyclic permutation.
-  // err = MPI_Alltoallw(plan->src, plan->ones, plan->cyc_sd, plan->cyc_st,
-  //     plan->innersrc, plan->ones, plan->cyc_rd, plan->cyc_rt, plan->comm);
+  // Stage one: cyclic permutation.
+  err = MPI_Alltoallw(plan->src, plan->ones, plan->cycle_senddispls,
+      plan->cycle_sendtypes, plan->innersrc, plan->ones, plan->cycle_recvdispls,
+      plan->cycle_recvtypes, plan->comm);
   if (err != MPI_SUCCESS) goto fail_immed;
-  // // Stage two: inner fft
-  // fftw_execute(plan->innerplan);
-  // fft_r2c_1d_finish(plan->innerdst, plan->nelems);
+  // Stage two: inner fft
+  fftw_execute(plan->innerplan);
   fft_r2c_finish(plan->innerdst, plan->ndims, plan->nelems);
+  // FIXME: As a debug aid, copy plan->innerdst directly to dst
+  int netelems = plan->len;
+  for(int d = 0; d < plan->ndims; ++d) netelems *= plan->nelems[d];
+  for(int i = 0; i < netelems; ++i) {
+    *((double complex *)plan->dst + i) = *((double complex *)plan->innerdst + i);
+  }
   // // Stage three: swizzle data
   // err = MPI_Alltoallw(plan->innerdst, plan->ones, plan->swiz_sd, plan->swiz_st,
   //     plan->outersrc, plan->ones, plan->swiz_rd, plan->swiz_rt, plan->comm);
@@ -314,84 +382,211 @@ int fft_par_execute(fft_par_plan plan)
   // err = MPI_Alltoallw(plan->outerdst, plan->ones, plan->swiz_rd, plan->swiz_rt,
   //     plan->dst, plan->ones, plan->swiz_sd, plan->swiz_st, plan->comm);
   // TODO: Compute the FFT rather than just zeroing the destination */
-  int nelems = 1; for(int d = 0; d < plan->ndims; ++d) nelems *= plan->nelems[d];
-  for(int i = 0; i < nelems; ++i) ((double complex *)plan->dst)[i] = 0.0;
 fail_immed:
   return err;
 }
 
 int cycle_data_parameter_fill(const fft_par_plan plan)
 {
-  // /* We only read these fields of plan */
-  // const int nelems = plan->nelems;
-  // const int comm = plan->comm;
+  /* We only read these fields of plan */
+  const int *const elems = plan->nelems;
+  const int *const procs = plan->nprocs;
+  const int dims = plan->ndims;
+  const int comm = plan->comm;
+  const int len = plan->len;
+  const int *const map = plan->map;
 
   MPI_Aint lb, ext;
   int err = MPI_Type_get_extent(MPI_DOUBLE, &lb, &ext);
   if(err != MPI_SUCCESS) goto fail_immed;
 
-  // int p;
-  // err = MPI_Comm_rank(comm, &p);
-  // if(err != MPI_SUCCESS) goto fail_immed;
+  int nprocs;
+  err = MPI_Comm_size(comm, &nprocs);
+  if(err != MPI_SUCCESS) goto fail_immed;
 
-  // int procs;
-  // err = MPI_Comm_size(comm, &procs);
-  // if(err != MPI_SUCCESS) goto fail_immed;
+  int procid;
+  err = MPI_Comm_rank(comm, &procid);
+  if(err != MPI_SUCCESS) goto fail_immed;
 
-  // // Compute sender offsets and types
-  // int r = 0;
-  // while(r < procs) {
-  //   plan->cyc_sd[r] = (((r - p*nelems) % procs + procs) % procs)*ext;
+  /* Allocate buffers for the types and offsets to use when sending */
+  plan->cycle_sendtypes = malloc(nprocs*sizeof(MPI_Datatype));
+  if(plan->cycle_sendtypes == NULL) goto fail_immed;
+  plan->cycle_senddispls = malloc(nprocs*sizeof(int));
+  if(plan->cycle_senddispls == NULL) goto fail_free_cycle_sendtypes;
+  /* Allocate buffers for the types and offsets to use when receiving */
+  plan->cycle_recvtypes = malloc(nprocs*sizeof(MPI_Datatype));
+  if(plan->cycle_recvtypes == NULL) goto fail_free_cycle_senddispls;
+  plan->cycle_recvdispls = malloc(nprocs*sizeof(int));
+  if(plan->cycle_recvdispls == NULL) goto fail_free_cycle_recvtypes;
 
-  //   int sc = nelems/procs +
-  //     (((r - p*nelems) % procs + procs) % procs < nelems % procs ? 1 : 0);
+  const int *const loc = map + procid*dims;
 
-  //   err = MPI_Type_vector(sc, 1, procs, MPI_DOUBLE, plan->cyc_st + r);
-  //   if(err != MPI_SUCCESS) goto fail_free_st;
-  //   err = MPI_Type_commit(plan->cyc_st + r);
-  //   if(err != MPI_SUCCESS) goto fail_free_st;
-  //   ++r;
-  // }
+  // Compute offsets to use when sending
+  for(int r = 0; r < nprocs; ++r) {
+    const int *const rloc = map + r*dims;
+    int displ = 0;
+    // Apply the same offset formula in conjunction with the row-major access
+    // formula to find the offset.
+    for(int d = 0; d < dims; ++d) {
+      displ = elems[d]*displ +
+        ((rloc[d] - loc[d]*elems[d]) % procs[d] + procs[d]) % procs[d];
+    }
+    plan->cycle_senddispls[r] = displ*ext*len;
+  }
+  // TODO: Delete this print statement
+  for(int i = 0; i < nprocs; ++i) {
+    if(i == procid) {
+      for(int r = 0; r < nprocs; ++r) {
+        printf("cyc_senddispls (%d", map[procid*dims]);
+        for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
+        printf(")->(%d", map[r*dims]);
+        for(int d = 1; d < dims; ++d) printf(",%d", map[r*dims + d]);
+        printf("): %d\n", plan->cycle_senddispls[r]);
+      }
+      fflush(stdout);
+    }
+    MPI_Barrier(comm);
+  }
+  // Compute offsets to use when receiving
+  for(int s = 0; s < nprocs; ++s) {
+     int displ = 0;
+     for(int d = 0; d < dims; ++d) {
+       const int *const sloc = map + s*dims;
+       displ *= elems[d];
+       for(int ss = 0; ss < sloc[d]; ++ss) {
+         displ += elems[d]/procs[d];
+         if(((loc[d] - ss*elems[d])%procs[d] + procs[d])%procs[d] <
+             elems[d] % procs[d]) {
+           ++displ;
+         }
+       }
+     }
+     plan->cycle_recvdispls[s] = displ*ext*len;
+  }
+  // TODO: Delete this print statement
+  for(int i = 0; i < nprocs; ++i) {
+     if(i == procid) {
+       for(int s = 0; s < nprocs; ++s) {
+         printf("cyc_recvdispls (%d", map[procid*dims]);
+         for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
+         printf(")<-(%d", map[s*dims]);
+         for(int d = 1; d < dims; ++d) printf(",%d", map[s*dims + d]);
+         printf("): %d\n", plan->cycle_recvdispls[s]);
+       }
+       fflush(stdout);
+     }
+     MPI_Barrier(comm);
+  }
+  int rc = -1; /* The last sendtype index with a type that needs to be freed */
+  for(int i = 0; i < nprocs; ++i) {
+  if(i == procid) {
+  for(int r = 0; r < nprocs; ++r) {
+    const int *const rloc = map + r*dims;
+    printf("cyc_sendcount: (%d", map[procid*dims]);
+    for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
+    printf(")->(%d", map[r*dims]);
+    for(int d = 1; d < dims; ++d) printf(",%d", map[r*dims + d]);
+    printf("):");
+    /* initialize type */
+    err = MPI_Type_contiguous(len, MPI_DOUBLE, plan->cycle_sendtypes + r);
+    if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+    rc = r;
+    int stride = len*ext;
+    /* Work downard along the dimensions, thus handling the fast indices first */
+    for(int d = dims - 1; d >= 0; --d) {
+      // Compute how many indices in this direction
+      int count = elems[d]/procs[d];
+      if(((rloc[d] - loc[d]*elems[d])%procs[d] + procs[d])%procs[d] <
+          elems[d] % procs[d]) {
+        ++count;
+      }
+      printf(" %d", count);
+      MPI_Datatype t,s;
+      err = MPI_Type_hvector(count, 1, procs[d]*stride, plan->cycle_sendtypes[r],
+          &t);
+      if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+      // Swap the new and old data types. This way, cycle_sendtypes[r] contains
+      // a valid type which needs to be deleted if a calamity occurs. Thus, we
+      // can skip out of the loop and free cycle_sendtypes[r] if we hit a
+      // problem.
+      s = t; t = plan->cycle_sendtypes[r]; plan->cycle_sendtypes[r] = s;
+      // Delete the old data type
+      err = MPI_Type_free(&t);
+      if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+      stride *= elems[d];
+    }
+    printf("\n");
+    err = MPI_Type_commit(plan->cycle_sendtypes + r);
+    if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+  }
+  fflush(stdout);
+  }
+  MPI_Barrier(comm);
+  }
 
-  // // Compute receiver count and types
-  // int s = 0;
-  // while(s < procs) {
-  //   // Displacement is the sum of the receive counts from the preceding
-  //   // processors.
-  //   int rd = 0;
-  //   for(int ss = 0; ss < s; ++ss) {
-  //     rd += nelems/procs +
-  //       (((p - ss*nelems) % procs + procs) % procs < nelems % procs ? 1 : 0);
-  //   }
-  //   // Multiple by the size of an MPI_DOUBLE, because MPI_Alltoallw takes its
-  //   // displacement in bytes.
-  //   plan->cyc_rd[s] = rd*ext;
+  int sc = -1;
+  for(int i = 0; i < nprocs; ++i) {
+  if(i == procid) {
+  for(int s = 0; s < nprocs; ++s) {
+    const int *const sloc = map + s*dims;
+    printf("cyc_recvcount: (%d", map[procid*dims]);
+    for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
+    printf(")<-(%d", map[s*dims]);
+    for(int d = 1; d < dims; ++d) printf(",%d", map[s*dims + d]);
+    printf("):");
+    /* initialize receive type */
+    err = MPI_Type_contiguous(len, MPI_DOUBLE, plan->cycle_recvtypes + s);
+    if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+    sc = s;
+    int stride = len*ext;
+    /* Work down through indices, from fastest to slowest */
+    for(int d = dims - 1; d >= 0; --d) {
+      int count = elems[d]/procs[d];
+      if(((loc[d] - sloc[d]*elems[d])%procs[d] + procs[d])%procs[d] <
+          elems[d] % procs[d]) {
+        ++count;
+      }
+      printf(" %d", count);
+      MPI_Datatype t, q;
+      err = MPI_Type_hvector(count, 1, stride, plan->cycle_recvtypes[s], &t);
+      if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+      /* As before, if t is a valid type, we want to swap it into recvtypes
+       * before freeing the old type.
+       */
+      q = t; t = plan->cycle_recvtypes[s]; plan->cycle_recvtypes[s] = q;
+      /* Delete the old data type */
+      err = MPI_Type_free(&t);
+      if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+      stride *= elems[d];
+    }
+    err = MPI_Type_commit(plan->cycle_recvtypes + s);
+    if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+    printf("\n");
+  }
+  fflush(stdout);
+  }
+  MPI_Barrier(comm);
+  }
 
-  //   int rc = nelems/procs + (((p - s*nelems) % procs + procs) % procs <
-  //       nelems % procs ? 1 : 0);
+  return err;
 
-  //   err = MPI_Type_contiguous(rc, MPI_DOUBLE, plan->cyc_rt + s);
-  //   if(err != MPI_SUCCESS) goto fail_free_rt;
-  //   err = MPI_Type_commit(plan->cyc_rt + s);
-  //   if(err != MPI_SUCCESS) goto fail_free_rt;
-  //   ++s;
-  // }
-
-  // return err;
-
-  // /* This error handling code does nothing, because if we get here, err !=
-  //  * MPI_SUCCESS. This is placed here so that if this function ever needs to
-  //  * accomodate a new source of error, this is here and doesn't need to be
-  //  * created long after I've forgotten how it should be done.
-  //  */
-  // fail_free_rt:
-  // while(s >= 0) {
-  //   if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cyc_rt + s);
-  // }
-  // fail_free_st:
-  // while(r >= 0) {
-  //   if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cyc_st + r);
-  // }
+fail_free_recvtypes:
+  while(sc >= 0) {
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_sendtypes + rc);
+    sc--;
+  }
+fail_free_sendtypes:
+  while(rc >= 0) {
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_sendtypes + rc);
+    rc--;
+  }
+  free(plan->cycle_recvdispls);
+fail_free_cycle_recvtypes:
+  free(plan->cycle_recvtypes);
+fail_free_cycle_senddispls:
+  free(plan->cycle_senddispls);
+fail_free_cycle_sendtypes:
+  free(plan->cycle_sendtypes);
 fail_immed:
   return err;
 }
