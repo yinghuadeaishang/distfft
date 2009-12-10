@@ -1,4 +1,5 @@
 #include <alloca.h>
+#include <string.h>
 #include "fft_ser.h"
 
 void fft_r2c_1d_finish(double complex * const v, const int n)
@@ -25,9 +26,7 @@ void fft_r2c_finish(double complex * const v, int const dims,
   // overwrite the data we have yet to deal with. Additionally, we don't need
   // to worry about the first row, since it's already at index zero.
   for(int i = leading_size - 1; i >= 0; --i) {
-    for(int j = last_len - 1; j >= 0; --j) {
-      *(v + size[dims - 1]*i + j) = *(v + last_len*i + j);
-    }
+    memmove(v + size[dims - 1]*i, v + last_len*i, last_len*sizeof(complex double));
   }
 
   // Now to fill in the remaining values, we need to exploit hermitian
