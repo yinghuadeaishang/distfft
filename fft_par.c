@@ -1,3 +1,4 @@
+#include <alloca.h>
 #include <complex.h>
 #include <math.h>
 #include <stdlib.h>
@@ -15,18 +16,23 @@ struct fft_par_plan_s {
   /* Communication Displacements */
   int *cycle_senddispls;
   int *cycle_recvdispls;
+  int *swizzle_senddispls;
+  int *swizzle_recvdispls;
   /* Communication Types */
   MPI_Datatype *cycle_sendtypes;
   MPI_Datatype *cycle_recvtypes;
+  MPI_Datatype *swizzle_sendtypes;
+  MPI_Datatype *swizzle_recvtypes;
   /* FFT Plans */
   fftw_plan innerplan;
+  fftw_plan *outerplan;
   int *ones;
-  int *map; /* [number of procs][ndims] location of each processor */
-  int *outerjobs; /* [number of procs] Number of outer jobs on each processor */
+  int *map; /* [procs][ndims] location of each processor */
+  int *outerjobs; /* [procs][ndims] Number of outer jobs on each processor */
   int *nelems; /* [ndims] Number of elements in each direction */
   int *nprocs; /* [ndims] Number of processors in each direction */
   int ndims; /* How many dimensions there are */
-  int len; /* the vector length of the data */
+  int procid;
   MPI_Comm comm;
 };
 
@@ -63,44 +69,77 @@ int swizzle_data_parameter_fill(fft_par_plan plan);
  *  the outer fourier transform. This routine multiplies the data in the
  *  outersrc array by the appropriate complex values.
  *
+ *  The process proceeds orthogonally for each rank.
+ *
  *  \param plan The plan owning the outersrc array to apply twiddle factors to.
  *  \return the MPI error code, if any
  */
 int apply_twiddle_factors(fft_par_plan plan)
 {
-  /* The work units are arranged across the processors cyclically:
-   * 0: 0, p, 2p, ...
-   * 1: 1, p+1, 2p+1, ..
-   * 2: 2, p+2, 2p+2, ..
-   * ...
-   * p-1: p-1, p + p - 1, 2p + p - 1...
-   *
-   * Each work unit needs to be multiplied by a twiddle factor which is exactly
-   * the root of unity of the number of elements in the entire fourier
-   * transform to the power of the product of the work unit, to the power of
-   * its index within the work unit.
-   */
-  int rank;
-  int err = MPI_Comm_rank(plan->comm, &rank);
+  int procid;
+  int err = MPI_Comm_rank(plan->comm, &procid);
   if(err != MPI_SUCCESS) goto fail_immed;
 
-  // int nprocs;
-  // err = MPI_Comm_size(plan->comm, &nprocs);
-  // if(err != MPI_SUCCESS) goto fail_immed;
+  const int dims = plan->ndims;
+  const int *const procs = plan->nprocs;
+  const int *const elems = plan->nelems;
+  const int *const ojobs = plan->outerjobs + procid*dims;
+  const int *const loc = plan->map + procid*dims;
 
-  // const double complex w0 = cexp(-2*M_PI*I/(nprocs*plan->nelems));
-  // for(int wu = 0; wu < plan->outerjobs[rank]; ++wu) {
-  //   for(int i = 0; i < nprocs; ++i) {
-  //     ((double complex *)plan->outersrc)[wu*nprocs + i] *=
-  //       cpow(w0, i*(wu*nprocs + rank));
-  //   }
-  // }
+  /* Multi-index within a work unit */
+  int *idx = alloca(dims*sizeof(int));
+  for(int d = 0; d < dims; ++d) idx[d] = 0;
+
+  int *wu = alloca(dims*sizeof(int));
+  for(int d = 0; d < dims; ++d) wu[d] = 0;
+
+  /* Root of unity in each direction */
+  double complex *w0 = alloca(dims*sizeof(complex double));
+  for(int d = 0; d < dims; ++d) w0[d] = cexp(-2*M_PI*I/elems[d]/procs[d]);
+
+  int cont = 1;
+  for(int d = 0; d < dims; ++d)
+    cont = cont && idx[d] < procs[d] && wu[d] < ojobs[d];
+
+  while(cont) {
+    int displ = 0;
+    for(int d = 0; d < dims; ++d)
+      displ = (displ*ojobs[d] + wu[d])*procs[d] + idx[d];
+
+    double complex *const tgt = (double complex *)plan->outersrc + displ;
+    for(int d = 0; d < dims; ++d)
+      *tgt *= cpow(w0[d], idx[d]*(wu[d]*procs[d] + loc[d]));
+
+    // Increment and spill backwards, interleaving work units and elements
+    // within the work units.
+    ++idx[dims - 1];
+    for(int d = dims - 1; d >= 1; --d) {
+      if(idx[d] >= procs[d]) {
+        idx[d] = 0;
+        wu[d]++;
+
+        if(wu[d] >= ojobs[d]) {
+          wu[d] = 0;
+          ++idx[d-1];
+        }
+      }
+    }
+
+    if(idx[0] >= procs[0]) {
+      idx[0] = 0;
+      wu[0]++;
+    }
+
+    cont = wu[0] < ojobs[0];
+  }
+
+  MPI_Barrier(plan->comm);
 fail_immed:
   return err;
 }
 
 fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, int ndims, const int *proc_dim,
-    const int *map, const int *size, int len, double *src, complex double *dst,
+    const int *map, const int *size, double *src, complex double *dst,
     int *errloc);
 
 fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int const nelems,
@@ -112,9 +151,9 @@ fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int const nelems,
 
   /* Create a trivial map for the one dimensional case */
   int *const map = malloc(size*sizeof(int));
-  for(int i = 0; i <= size; ++i) map[i] = i;
+  for(int i = 0; i < size; ++i) map[i] = i;
 
-  fft_par_plan plan = fft_par_plan_r2c_nc(comm, 1, &size, map, &nelems, 1,
+  fft_par_plan plan = fft_par_plan_r2c_nc(comm, 1, &size, map, &nelems,
       src, dst, &err);
 
   free(map);
@@ -161,7 +200,7 @@ fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *const size,
   // Call this helper function to actually initialize, it doesn't assume
   // cartesian topology information is attached to the communicator.
   fft_par_plan plan = fft_par_plan_r2c_nc(comm, ndims, proc_dim, map, size,
-      len, src, dst, &err);
+      src, dst, &err);
 
   /* Resources freed when this function failed */
 fail_free_map:
@@ -179,7 +218,7 @@ fail_immed:
 
 fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
     const int *const proc_dim, const int *const map, const int *const size,
-    const int len, double * const src, double complex * const dst, int *errloc)
+    double * const src, double complex * const dst, int *errloc)
 {
   int rank;
   int err = MPI_Comm_rank(comm, &rank);
@@ -192,10 +231,10 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   plan->ndims = ndims;
   plan->src = src;
   plan->dst = dst;
-  plan->len = len;
+  plan->procid = rank;
 
   /* The total number of data elements on each processor */
-  int netlen = len; for(int i = 0; i < ndims; ++i) netlen *= size[i];
+  int netlen = 1; for(int i = 0; i < ndims; ++i) netlen *= size[i];
 
   /* The total number of processors on the grid */
   int nprocs = 1; for(int i = 0; i < ndims; ++i) nprocs *= proc_dim[i];
@@ -243,9 +282,9 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   if(plan->innersrc == NULL) goto fail_free_nprocs;
   plan->innerdst = fftw_malloc(netlen*sizeof(double complex));
   if(plan->innerdst == NULL) goto fail_free_innersrc;
-  plan->outersrc = fftw_malloc(ojobs*len*nprocs*sizeof(double complex));
+  plan->outersrc = fftw_malloc(ojobs*nprocs*sizeof(double complex));
   if(plan->outersrc == NULL) goto fail_free_innerdst;
-  plan->outerdst = fftw_malloc(ojobs*len*nprocs*sizeof(double complex));
+  plan->outerdst = fftw_malloc(ojobs*nprocs*sizeof(double complex));
   if(plan->outerdst == NULL) goto fail_free_outersrc;
 
   /* Allocate an array of ones to use in MPI_Alltoallw as the send count. The
@@ -259,15 +298,66 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   err = cycle_data_parameter_fill(plan);
   if(err != MPI_SUCCESS) goto fail_free_ones;
 
+  /* Initialize the swizzle communication types */
+  err = swizzle_data_parameter_fill(plan);
+  if(err != MPI_SUCCESS) goto fail_free_cycle_params;
+
   plan->innerplan = fftw_plan_dft_r2c(ndims, size, plan->innersrc,
       plan->innerdst, FFTW_ESTIMATE);
   if(plan->innerplan == NULL) goto fail_free_swizzle_params;
+  
+  /* Initialize the outer plans */
+  plan->outerplan = malloc(ojobs*sizeof(fftw_plan));
+  if(plan->outerplan == NULL) goto fail_free_innerplan;
+  int op = -1; /* Last outer plan successfully allocated */
+  int *embed = alloca(ndims * sizeof(int));
+  for(int d = 0; d < ndims; ++d) {
+    embed[d] = plan->nprocs[d]*plan->outerjobs[rank*ndims + d];
+  }
+  int *const jcoords = alloca(ndims*sizeof(int));
+  for(int job = 0; job < ojobs; ++job) {
+    double complex *const src = plan->outersrc;
+    double complex *const dst = plan->outerdst;
+
+    int j = job;
+    /* Compute coordinates */
+    for(int d = ndims - 1; d >= 0; --d) {
+      jcoords[d] = j % plan->outerjobs[rank*ndims + d];
+      j /= plan->outerjobs[rank*ndims + d];
+    }
+    int displ = 0;
+    for(int d = 0; d < ndims; ++d) {
+      displ = displ*plan->outerjobs[rank*ndims + d]*plan->nprocs[d]
+        + jcoords[d]*plan->nprocs[d];
+    }
+    plan->outerplan[job] = fftw_plan_many_dft(ndims, plan->nprocs, 1,
+        src + displ, embed, 1, 1, dst + displ, embed, 1, 1, FFTW_FORWARD,
+        FFTW_ESTIMATE);
+    if(plan->outerplan[job] == NULL) goto fail_free_outerplan;
+    op = job;
+  }
 
   if(errloc != NULL) *errloc = err;
   return plan;
 
+fail_free_outerplan:
+  while(op >= 0) {
+    fftw_destroy_plan(plan->outerplan[op]);
+    op--;
+  }
+  free(plan->outerplan);
+fail_free_innerplan:
+  free(plan->innerplan);
 fail_free_swizzle_params:
-//fail_free_cycle_params:
+  for(int i = 0; i < nprocs; ++i) {
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_sendtypes + i);
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_recvtypes + i);
+  }
+  free(plan->swizzle_sendtypes);
+  free(plan->swizzle_recvtypes);
+  free(plan->swizzle_senddispls);
+  free(plan->swizzle_recvdispls);
+fail_free_cycle_params:
   for(int i = 0; i < nprocs; ++i) {
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_sendtypes + i);
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_recvtypes + i);
@@ -305,16 +395,30 @@ int fft_par_plan_destroy(fft_par_plan plan)
 {
   int err = MPI_SUCCESS;
 
-  int procs = 1; for(int d = 0; d < plan->ndims; ++d) procs *= plan->nprocs[d];
+  int procs = 1, ojobs = 1;
+  for(int d = 0; d < plan->ndims; ++d) {
+    procs *= plan->nprocs[d];
+    ojobs *= plan->outerjobs[plan->procid*plan->ndims + d];
+  }
 
   /* Free up MPI resources */
   for(int i = 0; i < procs; ++i) {
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_sendtypes + i);
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_recvtypes + i);
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_sendtypes + i);
+    if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_recvtypes + i);
   }
 
   /* Free up memory buffers */
+  for(int j = 0; j < ojobs; ++j) {
+    fftw_destroy_plan(plan->outerplan[j]);
+  }
+  free(plan->outerplan);
   fftw_destroy_plan(plan->innerplan);
+  free(plan->swizzle_recvdispls);
+  free(plan->swizzle_recvtypes);
+  free(plan->swizzle_senddispls);
+  free(plan->swizzle_sendtypes);
   free(plan->cycle_recvdispls);
   free(plan->cycle_recvtypes);
   free(plan->cycle_senddispls);
@@ -328,7 +432,6 @@ int fft_par_plan_destroy(fft_par_plan plan)
   free(plan->nelems);
   free(plan->map);
   free(plan->outerjobs);
-
   free(plan);
 
   return err;
@@ -345,43 +448,27 @@ int fft_par_execute(fft_par_plan plan)
   // Stage two: inner fft
   fftw_execute(plan->innerplan);
   fft_r2c_finish(plan->innerdst, plan->ndims, plan->nelems);
-  // FIXME: As a debug aid, copy plan->innerdst directly to dst
-  int netelems = plan->len;
-  for(int d = 0; d < plan->ndims; ++d) netelems *= plan->nelems[d];
-  for(int i = 0; i < netelems; ++i) {
-    *((double complex *)plan->dst + i) = *((double complex *)plan->innerdst + i);
+  // Stage three: swizzle data
+  err = MPI_Alltoallw(plan->innerdst, plan->ones, plan->swizzle_senddispls,
+     plan->swizzle_sendtypes, plan->outersrc, plan->ones,
+     plan->swizzle_recvdispls, plan->swizzle_recvtypes, plan->comm);
+  if(err != MPI_SUCCESS) goto fail_immed;
+  //Stage four: twiddle factors
+  err = apply_twiddle_factors(plan);
+  if(err != MPI_SUCCESS) goto fail_immed;
+  // Stage five: outer fft
+  int ojobs = 1;
+  for(int d = 0; d < plan->ndims; ++d) {
+    ojobs *= plan->outerjobs[plan->procid*plan->ndims + d];
   }
-  // // Stage three: swizzle data
-  // err = MPI_Alltoallw(plan->innerdst, plan->ones, plan->swiz_sd, plan->swiz_st,
-  //     plan->outersrc, plan->ones, plan->swiz_rd, plan->swiz_rt, plan->comm);
-  // if(err != MPI_SUCCESS) goto fail_immed;
-  // //Stage four: twiddle factors
-  // err = apply_twiddle_factors(plan);
-  // if(err != MPI_SUCCESS) goto fail_immed;
-  // // Stage five: outer fft
-  // int rank;
-  // err = MPI_Comm_rank(plan->comm, &rank);
-  // if(err != MPI_SUCCESS) goto fail_immed;
-  // int nprocs;
-  // err = MPI_Comm_size(plan->comm, &nprocs);
-  // if(err != MPI_SUCCESS) goto fail_immed;
-  // for(int w = 0; w < plan->outerjobs[rank]; ++w) {
-  //   /* Execute the fft for each work unit. The use of fftw_execute_dft is
-  //    * fraught with peril, because we have to ensure we have the proper
-  //    * alignment for each block. The outersrc and outerdst buffers are
-  //    * allocated to 8 or 16 byte alignment, depending on the SIMD requirements
-  //    * of the platform.  The size of a double complex is 16 bytes, so each work
-  //    * unit is thus also 8 or 16 byte aligned.
-  //    */
-  //   fftw_execute_dft(plan->outerplan,
-  //       (double complex *)plan->outersrc + w*nprocs,
-  //       (double complex *)plan->outerdst + w*nprocs);
-  // }
-  // // Stage six: rearrange data back to destination
-  // // This is the reverse of the previous swizzling step
-  // err = MPI_Alltoallw(plan->outerdst, plan->ones, plan->swiz_rd, plan->swiz_rt,
-  //     plan->dst, plan->ones, plan->swiz_sd, plan->swiz_st, plan->comm);
-  // TODO: Compute the FFT rather than just zeroing the destination */
+  for(int w = 0; w < ojobs; ++w) {
+    fftw_execute(plan->outerplan[w]);
+  }
+  // Stage six: rearrange data back to destination
+  // This is the reverse of the previous swizzling step
+  err = MPI_Alltoallw(plan->outerdst, plan->ones, plan->swizzle_recvdispls,
+      plan->swizzle_recvtypes, plan->dst, plan->ones, plan->swizzle_senddispls,
+      plan->swizzle_sendtypes, plan->comm);
 fail_immed:
   return err;
 }
@@ -393,7 +480,6 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
   const int *const procs = plan->nprocs;
   const int dims = plan->ndims;
   const int comm = plan->comm;
-  const int len = plan->len;
   const int *const map = plan->map;
 
   MPI_Aint lb, ext;
@@ -431,21 +517,7 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
       displ = elems[d]*displ +
         ((rloc[d] - loc[d]*elems[d]) % procs[d] + procs[d]) % procs[d];
     }
-    plan->cycle_senddispls[r] = displ*ext*len;
-  }
-  // TODO: Delete this print statement
-  for(int i = 0; i < nprocs; ++i) {
-    if(i == procid) {
-      for(int r = 0; r < nprocs; ++r) {
-        printf("cyc_senddispls (%d", map[procid*dims]);
-        for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
-        printf(")->(%d", map[r*dims]);
-        for(int d = 1; d < dims; ++d) printf(",%d", map[r*dims + d]);
-        printf("): %d\n", plan->cycle_senddispls[r]);
-      }
-      fflush(stdout);
-    }
-    MPI_Barrier(comm);
+    plan->cycle_senddispls[r] = displ*ext;
   }
   // Compute offsets to use when receiving
   for(int s = 0; s < nprocs; ++s) {
@@ -461,37 +533,16 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
          }
        }
      }
-     plan->cycle_recvdispls[s] = displ*ext*len;
-  }
-  // TODO: Delete this print statement
-  for(int i = 0; i < nprocs; ++i) {
-     if(i == procid) {
-       for(int s = 0; s < nprocs; ++s) {
-         printf("cyc_recvdispls (%d", map[procid*dims]);
-         for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
-         printf(")<-(%d", map[s*dims]);
-         for(int d = 1; d < dims; ++d) printf(",%d", map[s*dims + d]);
-         printf("): %d\n", plan->cycle_recvdispls[s]);
-       }
-       fflush(stdout);
-     }
-     MPI_Barrier(comm);
+     plan->cycle_recvdispls[s] = displ*ext;
   }
   int rc = -1; /* The last sendtype index with a type that needs to be freed */
-  for(int i = 0; i < nprocs; ++i) {
-  if(i == procid) {
   for(int r = 0; r < nprocs; ++r) {
     const int *const rloc = map + r*dims;
-    printf("cyc_sendcount: (%d", map[procid*dims]);
-    for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
-    printf(")->(%d", map[r*dims]);
-    for(int d = 1; d < dims; ++d) printf(",%d", map[r*dims + d]);
-    printf("):");
     /* initialize type */
-    err = MPI_Type_contiguous(len, MPI_DOUBLE, plan->cycle_sendtypes + r);
+    err = MPI_Type_dup(MPI_DOUBLE, plan->cycle_sendtypes + r);
     if(err != MPI_SUCCESS) goto fail_free_sendtypes;
     rc = r;
-    int stride = len*ext;
+    int stride = ext;
     /* Work downard along the dimensions, thus handling the fast indices first */
     for(int d = dims - 1; d >= 0; --d) {
       // Compute how many indices in this direction
@@ -500,7 +551,6 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
           elems[d] % procs[d]) {
         ++count;
       }
-      printf(" %d", count);
       MPI_Datatype t,s;
       err = MPI_Type_hvector(count, 1, procs[d]*stride, plan->cycle_sendtypes[r],
           &t);
@@ -515,30 +565,18 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
       if(err != MPI_SUCCESS) goto fail_free_sendtypes;
       stride *= elems[d];
     }
-    printf("\n");
     err = MPI_Type_commit(plan->cycle_sendtypes + r);
     if(err != MPI_SUCCESS) goto fail_free_sendtypes;
   }
-  fflush(stdout);
-  }
-  MPI_Barrier(comm);
-  }
 
   int sc = -1;
-  for(int i = 0; i < nprocs; ++i) {
-  if(i == procid) {
   for(int s = 0; s < nprocs; ++s) {
     const int *const sloc = map + s*dims;
-    printf("cyc_recvcount: (%d", map[procid*dims]);
-    for(int d = 1; d < dims; ++d) printf(",%d", map[procid*dims + d]);
-    printf(")<-(%d", map[s*dims]);
-    for(int d = 1; d < dims; ++d) printf(",%d", map[s*dims + d]);
-    printf("):");
     /* initialize receive type */
-    err = MPI_Type_contiguous(len, MPI_DOUBLE, plan->cycle_recvtypes + s);
+    err = MPI_Type_dup(MPI_DOUBLE, plan->cycle_recvtypes + s);
     if(err != MPI_SUCCESS) goto fail_free_recvtypes;
     sc = s;
-    int stride = len*ext;
+    int stride = ext;
     /* Work down through indices, from fastest to slowest */
     for(int d = dims - 1; d >= 0; --d) {
       int count = elems[d]/procs[d];
@@ -546,7 +584,6 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
           elems[d] % procs[d]) {
         ++count;
       }
-      printf(" %d", count);
       MPI_Datatype t, q;
       err = MPI_Type_hvector(count, 1, stride, plan->cycle_recvtypes[s], &t);
       if(err != MPI_SUCCESS) goto fail_free_recvtypes;
@@ -561,11 +598,6 @@ int cycle_data_parameter_fill(const fft_par_plan plan)
     }
     err = MPI_Type_commit(plan->cycle_recvtypes + s);
     if(err != MPI_SUCCESS) goto fail_free_recvtypes;
-    printf("\n");
-  }
-  fflush(stdout);
-  }
-  MPI_Barrier(comm);
   }
 
   return err;
@@ -593,61 +625,134 @@ fail_immed:
 
 int swizzle_data_parameter_fill(const fft_par_plan plan)
 {
-  // /* We only read these members of plan */
-  // MPI_Comm comm = plan->comm;
-  // const int * const ojobs = plan->outerjobs;
-  //
+  /* We only read these members of plan */
+  MPI_Comm comm = plan->comm;
+  const int dims = plan->ndims;
+  const int *const map = plan->map;
+  const int *const elems = plan->nelems;
+  const int *const procs = plan->nprocs;
+  const int *const ojobs = plan->outerjobs;
+
   MPI_Aint lb, ext;
   int err = MPI_Type_get_extent(MPI_C_DOUBLE_COMPLEX, &lb, &ext);
   if(err != MPI_SUCCESS) goto fail_immed;
 
-  // int procs;
-  // err = MPI_Comm_size(comm, &procs);
-  // if(err != MPI_SUCCESS) goto fail_immed;
+  int nprocs;
+  err = MPI_Comm_size(comm, &nprocs);
+  if(err != MPI_SUCCESS) goto fail_immed;
 
-  // int rank;
-  // err = MPI_Comm_rank(comm, &rank);
-  // if(err != MPI_SUCCESS) goto fail_immed;
+  int procid;
+  err = MPI_Comm_rank(comm, &procid);
+  if(err != MPI_SUCCESS) goto fail_immed;
 
-  // int r = 0;
-  // while(r < procs) {
-  //   plan->swiz_sd[r] = r*ext;
+  /* Allocate buffers for the types and offsets to use when sending */
+  plan->swizzle_sendtypes = malloc(nprocs*sizeof(MPI_Datatype));
+  if(plan->swizzle_sendtypes == NULL) goto fail_immed;
+  plan->swizzle_senddispls = malloc(nprocs*sizeof(int));
+  if(plan->swizzle_senddispls == NULL) goto fail_free_swizzle_sendtypes;
+  /* Allocate buffers for the types and offsets to use when receiving */
+  plan->swizzle_recvtypes = malloc(nprocs*sizeof(MPI_Datatype));
+  if(plan->swizzle_recvtypes == NULL) goto fail_free_swizzle_senddispls;
+  plan->swizzle_recvdispls = malloc(nprocs*sizeof(int));
+  if(plan->swizzle_recvdispls == NULL) goto fail_free_swizzle_recvtypes;
 
-  //   err = MPI_Type_vector(ojobs[r], 1, procs, MPI_C_DOUBLE_COMPLEX,
-  //       plan->swiz_st + r);
-  //   if(err != MPI_SUCCESS) goto fail_free_st;
-  //   err = MPI_Type_commit(plan->swiz_st + r);
-  //   if(err != MPI_SUCCESS) goto fail_free_st;
+  // Compute offsets to use when sending
+  for(int r = 0; r < nprocs; ++r) {
+    const int *const rloc = map + r*dims;
+    int displ = 0;
+    // Apply the same offset formula in conjunction with the row-major access
+    // formula to find the offset.
+    for(int d = 0; d < dims; ++d) {
+      displ = elems[d]*displ + rloc[d];
+    }
+    plan->swizzle_senddispls[r] = displ*ext;
+  }
+  // Compute offsets to use when receiving
+  for(int s = 0; s < nprocs; ++s) {
+    const int *const sloc = map + s*dims;
+    int displ = 0;
+    // Apply the same offset formula in conjunction with the row-major access
+    // formula to find the offset. We need to use the size of the outer matrix
+    // in order to find the correct offset.
+    for(int d = 0; d < dims; ++d) {
+      displ = procs[d]*ojobs[procid*dims + d]*displ + sloc[d];
+    }
+    plan->swizzle_recvdispls[s] = displ*ext;
+  }
+  int rc = -1; /* The last sendtype index with a type that needs to be freed */
+  for(int r = 0; r < nprocs; ++r) {
+    /* initialize type */
+    err = MPI_Type_dup(MPI_C_DOUBLE_COMPLEX, plan->swizzle_sendtypes + r);
+    if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+    rc = r;
+    int stride = ext;
+    /* Work downard along the dimensions, thus handling the fast indices first */
+    for(int d = dims - 1; d >= 0; --d) {
+      // Compute how many indices in this direction
+      int count = ojobs[r*dims + d];
+      MPI_Datatype t,s;
+      err = MPI_Type_hvector(count, 1, procs[d]*stride, plan->swizzle_sendtypes[r],
+          &t);
+      if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+      // Swap the new and old data types. This way, swizzle_sendtypes[r] contains
+      // a valid type which needs to be deleted if a calamity occurs. Thus, we
+      // can skip out of the loop and free swizzle_sendtypes[r] if we hit a
+      // problem.
+      s = t; t = plan->swizzle_sendtypes[r]; plan->swizzle_sendtypes[r] = s;
+      // Delete the old data type
+      err = MPI_Type_free(&t);
+      if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+      stride *= elems[d];
+    }
+    err = MPI_Type_commit(plan->swizzle_sendtypes + r);
+    if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+  }
+  int sc = -1; /* The last recvtype index with a type that needs to be freed */
+  for(int s = 0; s < nprocs; ++s) {
+    /* Initialize type */
+    err = MPI_Type_dup(MPI_C_DOUBLE_COMPLEX, plan->swizzle_recvtypes + s);
+    if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+    sc = s;
+    int stride = ext;
+    /* Work downward through vectors, handling fast indices first */
+    for(int d = dims - 1; d >= 0; --d) {
+      const int count = ojobs[procid*dims + d];
+      MPI_Datatype t, q;
+      err = MPI_Type_hvector(count, 1, stride*procs[d],
+          plan->swizzle_recvtypes[s], &t);
+      if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+      /* Swap the new and old data before deleting so that there is *always* a
+       * valid datatype in recvtypes. This means that if freeing the old
+       * datatype fails, we can still try and free the new one.
+       */
+      q = t; t = plan->swizzle_recvtypes[s]; plan->swizzle_recvtypes[s] = q;
+      err = MPI_Type_free(&t);
+      if(err != MPI_SUCCESS) goto fail_free_recvtypes;
+      stride *= count*procs[d];
+    }
+    err = MPI_Type_commit(plan->swizzle_recvtypes + s);
+    if(err != MPI_SUCCESS) goto fail_free_sendtypes;
+  }
 
-  //   ++r;
-  // }
+  return err;
 
-  // int s = 0;
-  // while(s < procs) {
-  //   plan->swiz_rd[s] = s*ext;
-
-  //   err = MPI_Type_vector(ojobs[rank], 1, procs, MPI_C_DOUBLE_COMPLEX,
-  //       plan->swiz_rt + s);
-  //   if(err != MPI_SUCCESS) goto fail_free_rt;
-  //   err = MPI_Type_commit(plan->swiz_rt + s);
-  //   if(err != MPI_SUCCESS) goto fail_free_st;
-
-  //   ++s;
-  // }
-
-  // return err;
-  // fail_free_rt:
-  // while(s >= 0) {
-  //   if(err == MPI_SUCCESS) MPI_Type_free(plan->swiz_rt + s);
-
-  //   --s;
-  // }
-  // fail_free_st:
-  // while(r >= 0) {
-  //   if(err == MPI_SUCCESS) MPI_Type_free(plan->swiz_st + r);
-
-  //   --r;
-  // }
+fail_free_recvtypes:
+  while(sc >= 0) {
+    if(err != MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_recvtypes + sc);
+    --sc;
+  }
+fail_free_sendtypes:
+  while(rc >= 0) {
+    if(err != MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_sendtypes + rc);
+    --rc;
+  }
+  free(plan->swizzle_recvdispls);
+fail_free_swizzle_recvtypes:
+  free(plan->swizzle_recvtypes);
+fail_free_swizzle_senddispls:
+  free(plan->swizzle_senddispls);
+fail_free_swizzle_sendtypes:
+  free(plan->swizzle_sendtypes);
 fail_immed:
   return err;
 }
