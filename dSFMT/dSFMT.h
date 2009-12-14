@@ -31,8 +31,8 @@
 #ifndef DSFMT_H
 #define DSFMT_H
 
-#include "../config.h"
-#define DSFMT_MEXP MTEXP
+/* Obtain DSFMT_MEXP from this file */
+#include "./config.h"
 
 #include <stdio.h>
 #include <assert.h>
