@@ -2,13 +2,14 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <math.h>
 #include <mpi.h>
 #include <fftw3.h>
 #include "dSFMT/dSFMT.h"
 #include "fft_par.h"
 #include "fft_ser.h"
 
-const int nelems[2] = {512, 416};
+const int nelems[2] = {51, 41};
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 

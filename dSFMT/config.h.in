@@ -2,6 +2,7 @@
 #define DSFMT_CONFIG_H_INCLUDED
 
 #define DSFMT_MEXP ${MTEXP}
+#cmakedefine DSFMT_BIG_ENDIAN
 #cmakedefine HAVE_SSE2
 
 #endif /* DSFMT_CONFIG_H_INCLUDED */

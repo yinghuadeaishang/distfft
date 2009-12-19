@@ -1,4 +1,3 @@
-#include "config.h"
 #include <complex.h>
 #include <math.h>
 #include <stddef.h>

@@ -5,6 +5,7 @@
 cmake_minimum_required(VERSION 2.8)
 
 include(CheckCCompilerFlag)
+include(TestBigEndian)
 
 # Set a cache variable for the mersenne twister exponent. Set a default value
 # which the user can override. Check the value to make sure it's valid.
@@ -26,6 +27,9 @@ endif(NOT VALID_EXP)
 add_library(dsfmt STATIC dSFMT.c)
 add_executable(dsfmt_test test.c)
 target_link_libraries(dsfmt_test dsfmt)
+
+# Check for endianness flags
+test_big_endian(DSFMT_BIG_ENDIAN)
 
 # Check for SIMD flags
 check_c_compiler_flag("-msse2" HAVE_SSE2)

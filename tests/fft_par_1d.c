@@ -11,7 +11,7 @@
 #include "fft_ser.h"
 #include "fft_par.h"
 
-const size_t proc_elems = 523232;
+const size_t proc_elems = 5232;
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 
