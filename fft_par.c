@@ -1,3 +1,4 @@
+#define _XOPEN_SOURCE 500
 #include <alloca.h>
 #include <complex.h>
 #include <math.h>
