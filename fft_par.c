@@ -97,10 +97,6 @@ int apply_twiddle_factors(fft_par_plan plan, int p)
   int wulen = 1;
   for(int d = 0; d < dims; ++d) { wulen *= procs[d]; }
 
-  /* Root of unity in each direction */
-  double complex *w0 = alloca(dims*sizeof(complex double));
-  for(int d = 0; d < dims; ++d) w0[d] = cexp(-2*M_PI*I/elems[d]/procs[d]);
-
   /* Zero the multi-index */
   for(int d = 0; d < dims; ++d) { wu[d] = 0; }
 
@@ -116,20 +112,47 @@ int apply_twiddle_factors(fft_par_plan plan, int p)
   /* The current target element we are applying the swizzle factor to */
   double complex *tgt = (double complex *)plan->outersrc + displ;
 
+  /* Root of unity in each direction */
+  double complex *w0 = alloca(dims*sizeof(complex double));
+  for(int d = 0; d < dims; ++d) { w0[d] = cexp(-2*M_PI*I/elems[d]/procs[d]); }
+
+  /* What to multiply the twiddle factor by each iteration, the ratio of twiddle
+   * factors between successive work units.
+   */
+  double complex *wprod = alloca(dims*sizeof(double complex));
+  for(int d = 0; d < dims; ++d) {
+    wprod[d] = cpow(w0[d], pidx[d]*procs[d]);
+  }
+
+  /* The current twiddle factor */
+  double complex *w = alloca(dims*sizeof(double complex));
+  for(int d = 0; d < dims; ++d) {
+    w[d] = cpow(w0[d], pidx[d]*loc[d]);
+  }
+
   int cont = 1; /* Continue iteration over work units */
   for(int d = 0; d < dims; ++d) { cont = cont && wu[d] < ojobs[d]; }
   while(cont) {
     /* Apply twiddle factors */
     for(int d = 0; d < dims; ++d) {
-      *tgt *= cpow(w0[d], pidx[d]*(wu[d]*procs[d] + loc[d]));
+      /* We essentially want to perform this operation
+       * *tgt *= cpow(w0[d], pidx[d]*(wu[d]*procs[d] + loc[d]));
+       */
+      *tgt *= w[d];
     }
 
-    /* Increment the work unit's outermost indices, and spill backwards */
+    /* Increment the work unit's outermost indices, and spill backwards.
+     * Increment the twiddle factor as we go
+     */
     ++wu[dims - 1];
+    w[dims - 1] *= wprod[dims - 1];
     for(int d = dims - 1; d >= 1; --d) {
       if(wu[d] >= ojobs[d]) {
         wu[d] = 0;
+        /* Reset twiddle factor in this dimension */
+        w[d] = cpow(w0[d], pidx[d]*loc[d]);
         ++wu[d-1];
+        w[d-1] *= wprod[d-1];
       }
     }
     cont = wu[0] < ojobs[0];
