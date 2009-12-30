@@ -10,7 +10,7 @@ void fft_r2c_1d_finish(double complex * const v, const int n)
   }
 }
 
-void fft_r2c_finish(double complex * const v, int const dims,
+void fft_r2c_finish_packed(double complex * const v, int const dims,
     const int *const size)
 {
   // The output we get from an r2c routine is a row major dimensioned matrix of
@@ -29,6 +29,14 @@ void fft_r2c_finish(double complex * const v, int const dims,
     memmove(v + size[dims - 1]*i, v + last_len*i, last_len*sizeof(complex double));
   }
 
+  // Now we have the unpacked format
+  fft_r2c_finish_unpacked(v, dims, size);
+}
+
+void fft_r2c_finish_unpacked(double complex * const v, int const dims,
+    const int *const size)
+{
+  const int last_len = size[dims - 1]/2 + 1;
   // Now to fill in the remaining values, we need to exploit hermitian
   // symmetry. Since we don't know how many dimensions we have, we'll use
   // multi-indices for looping.
@@ -36,12 +44,19 @@ void fft_r2c_finish(double complex * const v, int const dims,
 
   // Initialize the multi index to the first value that needs to be filled.
   idx[dims - 1] = last_len;
-  for(int d = dims - 2; d >= 0; --d) idx[d] = 0;
+  for(int d = dims - 2; d >= 0; --d) {
+    idx[d] = 0;
+  }
 
   // If we should continue the iteration
-  int cont = idx[dims - 1] < size[dims - 1];
+  int cont = 1;
+  for(int d = 0; d < dims; ++d) {
+    cont = cont && idx[d] < size[d];
+  }
 
-  int netsize = 1; for(int d = 0; d < dims; ++d) netsize *= size[d];
+  int netsize = 1; for(int d = 0; d < dims; ++d) {
+    netsize *= size[d];
+  }
 
   while(cont) {
     // compute the destination from the row index using the row-major formula

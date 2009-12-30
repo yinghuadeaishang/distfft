@@ -167,7 +167,7 @@ int main(int argc, char **argv)
   double start_time = MPI_Wtime();
   for(int t = 0; t < TRIALS; ++t) {
     fftw_execute(serial_plan);
-    fft_r2c_finish(serial, 2, masterdim);
+    fft_r2c_finish_packed(serial, 2, masterdim);
   }
   double end_time = MPI_Wtime();
   if(rank == 0) {

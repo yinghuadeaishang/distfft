@@ -52,7 +52,7 @@ int main(int argc, char *argv[])
   fftw_execute(fwd_plan);
 
   // Fill in the rest of the destination values using the Hermitian property.
-  fft_r2c_finish(fft, DIMS, size);
+  fft_r2c_finish_packed(fft, DIMS, size);
 
   // Allocate the reverse FFT destination array
   double complex *dst = fftw_malloc(netsize*sizeof(double complex));

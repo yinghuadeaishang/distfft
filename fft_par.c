@@ -330,8 +330,8 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   err = swizzle_data_parameter_fill(plan);
   if(err != MPI_SUCCESS) goto fail_free_cycle_params;
 
-  plan->innerplan = fftw_plan_dft_r2c(ndims, size, plan->innersrc,
-      plan->innerdst, FFTW_ESTIMATE);
+  plan->innerplan = fftw_plan_many_dft_r2c(ndims, size, 1, plan->innersrc,
+      size, 1, netlen, plan->innerdst, size, 1, netlen, FFTW_ESTIMATE);
   if(plan->innerplan == NULL) goto fail_free_swizzle_params;
 
   /* Initialize the outer plan */
@@ -442,7 +442,8 @@ int fft_par_execute(fft_par_plan plan)
   if (err != MPI_SUCCESS) goto fail_immed;
   // Stage two: inner fft
   fftw_execute(plan->innerplan);
-  fft_r2c_finish(plan->innerdst, plan->ndims, plan->nelems);
+  // Stage 2.5: finish the fourier transform
+  fft_r2c_finish_unpacked(plan->innerdst, plan->ndims, plan->nelems);
   // Stage three: swizzle data
   err = MPI_Alltoallw(plan->innerdst, plan->ones, plan->swizzle_senddispls,
      plan->swizzle_sendtypes, plan->outersrc, plan->ones,

@@ -17,6 +17,8 @@
  */
 void fft_r2c_1d_finish(double complex *v, int n);
 
-void fft_r2c_finish(double complex *v, int dims, const int *size);
+void fft_r2c_finish_unpacked(double complex *v, int dims, const int *size);
+
+void fft_r2c_finish_packed(double complex *v, int dims, const int *size);
 
 #endif /* HEADER_FFT_SER_INCLUDED */
