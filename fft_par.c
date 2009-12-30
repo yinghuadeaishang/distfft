@@ -70,12 +70,15 @@ int swizzle_data_parameter_fill(fft_par_plan plan);
  *  the outer fourier transform. This routine multiplies the data in the
  *  outersrc array by the appropriate complex values.
  *
- *  The process proceeds orthogonally for each rank.
+ *  The process proceeds orthogonally for each rank, and operates on the data
+ *  coming from a single specified processor.
  *
  *  \param plan The plan owning the outersrc array to apply twiddle factors to.
+ *  \param p The elements coming from processor p have the twiddle factors
+ *  applied.
  *  \return the MPI error code, if any
  */
-int apply_twiddle_factors(fft_par_plan plan)
+int apply_twiddle_factors(fft_par_plan plan, int p)
 {
   int procid;
   int err = MPI_Comm_rank(plan->comm, &procid);
@@ -98,44 +101,40 @@ int apply_twiddle_factors(fft_par_plan plan)
   double complex *w0 = alloca(dims*sizeof(complex double));
   for(int d = 0; d < dims; ++d) w0[d] = cexp(-2*M_PI*I/elems[d]/procs[d]);
 
-  int netprocs = 1; for(int d = 0; d < dims; ++d) { netprocs *= procs[d]; }
-  for(int p = 0; p < netprocs; ++p)
-  {
-    /* Zero the multi-index */
-    for(int d = 0; d < dims; ++d) { wu[d] = 0; }
+  /* Zero the multi-index */
+  for(int d = 0; d < dims; ++d) { wu[d] = 0; }
 
-    /* The processor index */
-    const int *const pidx = plan->map + p*dims;
+  /* The processor index */
+  const int *const pidx = plan->map + p*dims;
 
-    /* The displacement of this processor's element within a workunit */
-    int displ = 0;
+  /* The displacement of this processor's element within a workunit */
+  int displ = 0;
+  for(int d = 0; d < dims; ++d) {
+    displ = displ*procs[d] + pidx[d];
+  }
+
+  /* The current target element we are applying the swizzle factor to */
+  double complex *tgt = (double complex *)plan->outersrc + displ;
+
+  int cont = 1; /* Continue iteration over work units */
+  for(int d = 0; d < dims; ++d) { cont = cont && wu[d] < ojobs[d]; }
+  while(cont) {
+    /* Apply twiddle factors */
     for(int d = 0; d < dims; ++d) {
-      displ = displ*procs[d] + pidx[d];
+      *tgt *= cpow(w0[d], pidx[d]*(wu[d]*procs[d] + loc[d]));
     }
 
-    /* The current target element we are applying the swizzle factor to */
-    double complex *tgt = (double complex *)plan->outersrc + displ;
-
-    int cont = 1; /* Continue iteration over work units */
-    for(int d = 0; d < dims; ++d) { cont = cont && wu[d] < ojobs[d]; }
-    while(cont) {
-      /* Apply twiddle factors */
-      for(int d = 0; d < dims; ++d) {
-        *tgt *= cpow(w0[d], pidx[d]*(wu[d]*procs[d] + loc[d]));
+    /* Increment the work unit's outermost indices, and spill backwards */
+    ++wu[dims - 1];
+    for(int d = dims - 1; d >= 1; --d) {
+      if(wu[d] >= ojobs[d]) {
+        wu[d] = 0;
+        ++wu[d-1];
       }
-
-      /* Increment the work unit's outermost indices, and spill backwards */
-      ++wu[dims - 1];
-      for(int d = dims - 1; d >= 1; --d) {
-        if(wu[d] >= ojobs[d]) {
-          wu[d] = 0;
-          ++wu[d-1];
-        }
-      }
-      cont = wu[0] < ojobs[0];
-      /* Increment the target */
-      tgt += wulen;
     }
+    cont = wu[0] < ojobs[0];
+    /* Increment the target */
+    tgt += wulen;
   }
 
 fail_immed:
@@ -427,7 +426,13 @@ int fft_par_execute(fft_par_plan plan)
      plan->swizzle_recvdispls, plan->swizzle_recvtypes, plan->comm);
   if(err != MPI_SUCCESS) goto fail_immed;
   //Stage four: twiddle factors
-  err = apply_twiddle_factors(plan);
+  int numprocs = 1;
+  for(int d = 0; d < plan->ndims; ++d) {
+    numprocs *= plan->nprocs[d];
+  }
+  for(int p = 0; p < numprocs; ++p) {
+    err = apply_twiddle_factors(plan,p);
+  }
   if(err != MPI_SUCCESS) goto fail_immed;
   // Stage five: outer fft
   fftw_execute(plan->outerplan);
