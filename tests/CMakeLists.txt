@@ -21,6 +21,10 @@ add_executable(fft_par_2d fft_par_2d.c)
 target_link_libraries(fft_par_2d fft_par fft_ser dsfmt ${FFTW_LIBRARIES}
   ${MPI_LIBRARIES})
 
+add_executable(fft_par_bench_2d fft_par_bench_2d.c)
+target_link_libraries(fft_par_bench_2d fft_par fft_ser dsfmt
+  ${FFTW_LIBRARIES} ${MPI_LIBRARIES})
+
 add_test(NAME fft_r2c_finish_1d COMMAND $<TARGET_FILE:fft_r2c_finish_1d>)
 add_test(NAME fft_r2c_finish_2d COMMAND $<TARGET_FILE:fft_r2c_finish_2d>)
 add_test(NAME fft_r2c_finish_nd COMMAND $<TARGET_FILE:fft_r2c_finish_nd>)

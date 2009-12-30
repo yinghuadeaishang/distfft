@@ -9,7 +9,7 @@
 #include "fft_par.h"
 #include "fft_ser.h"
 
-const int nelems[2] = {512, 416};
+const int nelems[2] = {1131, 1113};
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 
@@ -117,6 +117,12 @@ int main(int argc, char **argv)
     goto die_free_parallel;
   }
 
+  /* Before starting time trails, do a run in order to touch the allocated
+   * memory. Memory on modern systems is mapped into address space on a call for
+   * memory, but not mapped to physical memory until it is touched. An untimed
+   * run ensures all the pages are allocated.
+   */
+  fft_par_execute(par_plan);
   /* Time the parallel transform */
   err = MPI_Barrier(cart);
   if(err != MPI_SUCCESS) {
