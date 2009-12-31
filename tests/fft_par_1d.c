@@ -11,7 +11,7 @@
 #include "fft_ser.h"
 #include "fft_par.h"
 
-const size_t proc_elems = 5232;
+const size_t proc_elems = 5231;
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 
@@ -20,7 +20,7 @@ typedef enum {
   FAILURE
 } status;
 
-status do_serial_fft(size_t len, double *src, double complex *dst);
+status do_serial_fft(size_t len, double *src, double complex *dst, int rank);
 status do_parallel_fft(double *src, double complex *dst);
 
 int main(int argc, char **argv)
@@ -89,19 +89,10 @@ int main(int argc, char **argv)
     goto die_free_master;
   }
 
-  // Time the serial fft.
-  double start_time = MPI_Wtime();
-
   // Compute the serial fft for comparison purposes
-  for(int t = 0; t < TRIALS; ++t) {
-    if(do_serial_fft(total_elems, master, serial) != SUCCESS) {
-      fprintf(stderr, "unable to perform serial fft\n");
-      goto die_free_serial;
-    }
-  }
-  if(rank == 0) {
-    printf("elapsed time for serial fft: %g\n", (MPI_Wtime() - start_time)/TRIALS);
-    fflush(stdout);
+  if(do_serial_fft(total_elems, master, serial, rank) != SUCCESS) {
+    fprintf(stderr, "unable to perform serial fft\n");
+    goto die_free_serial;
   }
 
   // Allocate space for the parallel fft solution.
@@ -111,22 +102,9 @@ int main(int argc, char **argv)
     goto die_free_serial;
   }
 
-  // Time the parallel fft.
-  if(MPI_SUCCESS != MPI_Barrier(MPI_COMM_WORLD)) {
-    fprintf(stderr, "unable to synchronize processes.\n");
-    goto die_free_serial;
-  }
-  start_time = MPI_Wtime();
-
-  for(int t = 0; t < TRIALS; ++t) {
-    if(do_parallel_fft(master + rank*proc_elems, parallel) != SUCCESS) {
-      fprintf(stderr, "unable to perform parallel fft\n");
-      goto die_free_parallel;
-    }
-  }
-  if(rank == 0) {
-    printf("elapsed time for parallel fft: %g\n", (MPI_Wtime() - start_time)/TRIALS);
-    fflush(stdout);
+  if(do_parallel_fft(master + rank*proc_elems, parallel) != SUCCESS) {
+    fprintf(stderr, "unable to perform parallel fft\n");
+    goto die_free_parallel;
   }
 
   /* Verify the serial computation against our parallel computation. Use the
@@ -162,7 +140,7 @@ die_immed:
 }
 
 status do_serial_fft(size_t const n, double * const src,
-    double complex * const dst)
+    double complex * const dst, const int rank)
 {
   status ret = FAILURE; // Failure until proven otherwise
   fftw_plan plan = fftw_plan_dft_r2c_1d(n, src, dst, FFTW_ESTIMATE);
@@ -171,9 +149,18 @@ status do_serial_fft(size_t const n, double * const src,
     goto fail_immed;
   }
 
-  // Do the fft.
-  fftw_execute(plan);
-  fft_r2c_1d_finish(dst, n);
+  /* Time the serial FFT */
+  double const start_time = MPI_Wtime();
+  for(int trial = 0; trial < TRIALS; ++trial) {
+    // Do the fft.
+    fftw_execute(plan);
+    fft_r2c_1d_finish(dst, n);
+  }
+
+  if(rank == 0) {
+    printf("average time for serial fft: %g\n", (MPI_Wtime() - start_time)/TRIALS);
+    fflush(stdout);
+  }
 
   ret = SUCCESS;
 
@@ -192,10 +179,25 @@ status do_parallel_fft(double * const src, double complex * const dst)
     goto fail_immed;
   }
 
-  ret = fft_par_execute_fwd(plan);
-  if(ret != MPI_SUCCESS) {
-    fprintf(stderr, "failure while performing parallel fft\n");
+  /* Time parallel transform */
+  double const start_time = MPI_Wtime();
+  for(int trial = 0; trial < TRIALS; ++trial) {
+    ret = fft_par_execute_fwd(plan);
+    if(ret != MPI_SUCCESS) {
+      fprintf(stderr, "failure while performing parallel fft\n");
+      goto fail_free_plan;
+    }
+  }
+
+  int rank;
+  if(MPI_Comm_rank(MPI_COMM_WORLD, &rank) != MPI_SUCCESS) {
+    fprintf(stderr, "unable to determine rank\n");
     goto fail_free_plan;
+  }
+
+  if(rank == 0) {
+    printf("average time for parallel fft: %g\n", (MPI_Wtime() - start_time)/TRIALS);
+    fflush(stdout);
   }
 
   ret = SUCCESS;
