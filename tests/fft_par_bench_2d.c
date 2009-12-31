@@ -9,7 +9,7 @@
 #include "fft_par.h"
 #include "fft_ser.h"
 
-const int nelems[2] = {1131, 1113};
+const int nelems[2] = {512, 417};
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 
