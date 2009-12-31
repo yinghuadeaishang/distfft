@@ -197,7 +197,7 @@ int main(int argc, char **argv)
   for(int i = 0; i < nelems[0]*nelems[1]; ++i) parallel[i] = 0.0;
 
   /* Create a parallel plan */
-  fft_par_plan par_plan = fft_par_plan_r2c(cart, nelems, 1, par_source,
+  fft_par_plan par_plan = fft_par_plan_r2c(cart, nelems, par_source,
       parallel, &err);
   if(par_plan == NULL) {
     fprintf(stderr, "unable to allocate parallel plan\n");

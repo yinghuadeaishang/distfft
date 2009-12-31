@@ -226,9 +226,8 @@ fail_immed:
   return plan;
 }
 
-fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *const size,
-    const int len, double *const src, double complex *const dst,
-    int *const errloc)
+fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *const size, double
+    *const src, double complex *const dst, int *const errloc)
 {
   fft_par_plan plan = NULL;
   int ndims;

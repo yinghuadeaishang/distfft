@@ -45,8 +45,7 @@ fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int nelems, double *src,
  *  distributed across processors. The transform will be computed in parallel.
  *
  *  This is a collective operation: all processors in the communicator should
- *  call this function with the same arguments for <tt>nelems</tt> and
- *  <tt>len</tt>.
+ *  call this function with the same argument for <tt>nelems</tt>.
  *
  *  Errors can be obtained from two sources: the MPI system or memory
  *  allocation. If there are any problems creating the plan, then <tt>NULL</tt>
@@ -62,15 +61,12 @@ fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int nelems, double *src,
  *  rank of the transform (the number of dimensions).
  *  \param size An array of the length of data in the corresponding direction
  *  <i>on each processor.</i>
- *  \param len The number of data elements which are to be transformed in
- *  parallel. For example, if you are fourier transforming an array of
- *  three-dimensional vectors, set this to three.
  *  \param err The return status from the MPI system. If <tt>NULL</tt> is given,
  *  then the MPI return status is not returned.
  *  \return A new plan, or <tt>NULL</tt> if there was an error creating the
  *  plan.
  */
-fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size, int len,
+fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size,
     double *src, double complex *dst, int *err);
 
 //! Execute a plan
