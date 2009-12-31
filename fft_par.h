@@ -86,6 +86,21 @@ fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size, int len,
  */
 int fft_par_execute_fwd(fft_par_plan);
 
+//! Execute the reverse transform of a plan.
+/*! Accept a reference to a previously created plan and execute it on the data
+ *  provided when the plan was created. The reverse transform is computed, from
+ *  the data in the destination array and placing the result in the source
+ *  array.
+ *
+ *  This is a collective operation: all processors in the communicator should
+ *  call this function with the plan which they all obtained by synchronous
+ *  calls to <tt>fft_par_plan_r2c</tt>
+ *
+ *  \param plan The plan to execute
+ *  \return The MPI status code
+ */
+int fft_par_execute_rev(fft_par_plan);
+
 //! Destroy a plan for computing parallel fourier transforms.
 /*! The plans contain buffers and other system resources which need to be
  *  freed. Any plan allocation should be matched with this function to

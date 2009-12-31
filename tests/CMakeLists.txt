@@ -17,6 +17,10 @@ add_executable(fft_par_1d fft_par_1d.c)
 target_link_libraries(fft_par_1d fft_par fft_ser dsfmt ${FFTW_LIBRARIES}
   ${MPI_LIBRARIES})
 
+add_executable(fft_par_rev_1d fft_par_rev_1d.c)
+target_link_libraries(fft_par_rev_1d fft_par fft_ser dsfmt ${FFTW_LIBRARIES}
+  ${MPI_LIBRARIES})
+
 add_executable(fft_par_2d fft_par_2d.c)
 target_link_libraries(fft_par_2d fft_par fft_ser dsfmt ${FFTW_LIBRARIES}
   ${MPI_LIBRARIES})
@@ -32,6 +36,9 @@ add_test(NAME fft_r2c_finish_nd COMMAND $<TARGET_FILE:fft_r2c_finish_nd>)
 add_test(NAME fft_par_1d COMMAND
   ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
   $<TARGET_FILE:fft_par_1d> ${MPIEXEC_POSTFLAGS})
+add_test(NAME fft_par_rev_1d COMMAND
+  ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
+  $<TARGET_FILE:fft_par_rev_1d> ${MPIEXEC_POSTFLAGS})
 add_test(NAME fft_par_2d COMMAND
   ${MPIEXEC} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS}
   $<TARGET_FILE:fft_par_2d> ${MPIEXEC_POSTFLAGS})
