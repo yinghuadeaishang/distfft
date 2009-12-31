@@ -122,7 +122,7 @@ int main(int argc, char **argv)
    * memory, but not mapped to physical memory until it is touched. An untimed
    * run ensures all the pages are allocated.
    */
-  fft_par_execute(par_plan);
+  fft_par_execute_fwd(par_plan);
   /* Time the parallel transform */
   err = MPI_Barrier(cart);
   if(err != MPI_SUCCESS) {
@@ -131,7 +131,7 @@ int main(int argc, char **argv)
   }
   double start_time = MPI_Wtime();
   for(int t = 0; t < TRIALS; ++t) {
-    fft_par_execute(par_plan);
+    fft_par_execute_fwd(par_plan);
   }
   double end_time = MPI_Wtime();
   if(rank == 0) {

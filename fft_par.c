@@ -24,11 +24,11 @@ struct fft_par_plan_s {
   MPI_Datatype *cycle_recvtypes;
   MPI_Datatype *swizzle_sendtypes;
   MPI_Datatype *swizzle_recvtypes;
-  MPI_Request *swizzle_sendreqs;
-  MPI_Request *swizzle_recvreqs;
+  MPI_Request *swizzle_sendreqs_fwd;
+  MPI_Request *swizzle_recvreqs_fwd;
   /* FFT Plans */
-  fftw_plan innerplan;
-  fftw_plan outerplan;
+  fftw_plan innerplan_fwd;
+  fftw_plan outerplan_fwd;
   int *ones;
   int *map; /* [procs][ndims] location of each processor */
   int *outerjobs; /* [procs][ndims] Number of outer jobs on each processor */
@@ -338,45 +338,50 @@ fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
   /* Array of MPI requests to be used in send/recv operations for the second
    * stage communication
    */
-  plan->swizzle_sendreqs = malloc(nprocs*sizeof(MPI_Request));
-  if(plan->swizzle_sendreqs == NULL) goto fail_free_ones;
+  plan->swizzle_sendreqs_fwd = malloc(nprocs*sizeof(MPI_Request));
+  if(plan->swizzle_sendreqs_fwd == NULL) goto fail_free_ones;
 
-  plan->swizzle_recvreqs = malloc(nprocs*sizeof(MPI_Request));
-  if(plan->swizzle_recvreqs == NULL) goto fail_free_swizzle_sendreqs;
+  plan->swizzle_recvreqs_fwd = malloc(nprocs*sizeof(MPI_Request));
+  if(plan->swizzle_recvreqs_fwd == NULL) goto fail_free_swizzle_sendreqs_fwd;
 
   /* Initialize the cyclic communication types */
   err = cycle_data_parameter_fill(plan);
-  if(err != MPI_SUCCESS) goto fail_free_swizzle_recvreqs;
+  if(err != MPI_SUCCESS) goto fail_free_swizzle_recvreqs_fwd;
 
   /* Initialize the swizzle communication types */
   err = swizzle_data_parameter_fill(plan);
   if(err != MPI_SUCCESS) goto fail_free_cycle_params;
 
-  plan->innerplan = fftw_plan_many_dft_r2c(ndims, size, 1, plan->innersrc,
-      size, 1, netlen, plan->innerdst, size, 1, netlen, FFTW_ESTIMATE);
-  if(plan->innerplan == NULL) goto fail_free_swizzle_params;
+  plan->innerplan_fwd = fftw_plan_many_dft_r2c(ndims, size, 1,
+      plan->innersrc, size, 1, netlen, plan->innerdst, size, 1, netlen,
+      FFTW_ESTIMATE);
+  if(plan->innerplan_fwd == NULL) goto fail_free_swizzle_params;
 
   /* Initialize the outer plan */
-  plan->outerplan = fftw_plan_many_dft(ndims, plan->nprocs, ojobs,
+  plan->outerplan_fwd = fftw_plan_many_dft(ndims, plan->nprocs, ojobs,
       plan->outersrc, NULL, 1, nprocs, plan->outerdst, NULL, 1, nprocs,
       FFTW_FORWARD, FFTW_ESTIMATE);
-  if(plan->outerplan == NULL) goto fail_free_innerplan;
+  if(plan->outerplan_fwd == NULL) goto fail_free_innerplan_fwd;
 
   /* Initialize persistent communication requests */
   err = fft_par_init_swizzle_reqs(plan);
-  if(err != MPI_SUCCESS) goto fail_free_outerplan;
+  if(err != MPI_SUCCESS) goto fail_free_outerplan_fwd;
 
   if(errloc != NULL) *errloc = err;
   return plan;
 
   for(int i = 0; i < nprocs; ++i) {
-    if(err == MPI_SUCCESS) { err = MPI_Request_free(plan->swizzle_sendreqs + i); }
-    if(err == MPI_SUCCESS) { err = MPI_Request_free(plan->swizzle_recvreqs + i); }
+    if(err == MPI_SUCCESS) {
+      err = MPI_Request_free(plan->swizzle_sendreqs_fwd + i);
+    }
+    if(err == MPI_SUCCESS) {
+      err = MPI_Request_free(plan->swizzle_recvreqs_fwd + i);
+    }
   }
-fail_free_outerplan:
-  fftw_destroy_plan(plan->outerplan);
-fail_free_innerplan:
-  free(plan->innerplan);
+fail_free_outerplan_fwd:
+  fftw_destroy_plan(plan->outerplan_fwd);
+fail_free_innerplan_fwd:
+  free(plan->innerplan_fwd);
 fail_free_swizzle_params:
   for(int i = 0; i < nprocs; ++i) {
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_sendtypes + i);
@@ -395,10 +400,10 @@ fail_free_cycle_params:
   free(plan->cycle_recvtypes);
   free(plan->cycle_senddispls);
   free(plan->cycle_recvdispls);
-fail_free_swizzle_recvreqs:
-  free(plan->swizzle_recvreqs);
-fail_free_swizzle_sendreqs:
-  free(plan->swizzle_sendreqs);
+fail_free_swizzle_recvreqs_fwd:
+  free(plan->swizzle_recvreqs_fwd);
+fail_free_swizzle_sendreqs_fwd:
+  free(plan->swizzle_sendreqs_fwd);
 fail_free_ones:
   free(plan->ones);
 fail_free_outerdst:
@@ -440,13 +445,17 @@ int fft_par_plan_destroy(fft_par_plan plan)
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->cycle_recvtypes + i);
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_sendtypes + i);
     if(err == MPI_SUCCESS) err = MPI_Type_free(plan->swizzle_recvtypes + i);
-    if(err == MPI_SUCCESS) err = MPI_Request_free(plan->swizzle_sendreqs + i);
-    if(err == MPI_SUCCESS) err = MPI_Request_free(plan->swizzle_recvreqs + i);
+    if(err == MPI_SUCCESS) {
+      err = MPI_Request_free(plan->swizzle_sendreqs_fwd + i);
+    }
+    if(err == MPI_SUCCESS) {
+      err = MPI_Request_free(plan->swizzle_recvreqs_fwd + i);
+    }
   }
 
   /* Free up memory buffers */
-  fftw_destroy_plan(plan->outerplan);
-  fftw_destroy_plan(plan->innerplan);
+  fftw_destroy_plan(plan->outerplan_fwd);
+  fftw_destroy_plan(plan->innerplan_fwd);
   free(plan->swizzle_recvdispls);
   free(plan->swizzle_recvtypes);
   free(plan->swizzle_senddispls);
@@ -455,8 +464,8 @@ int fft_par_plan_destroy(fft_par_plan plan)
   free(plan->cycle_recvtypes);
   free(plan->cycle_senddispls);
   free(plan->cycle_sendtypes);
-  free(plan->swizzle_recvreqs);
-  free(plan->swizzle_sendreqs);
+  free(plan->swizzle_recvreqs_fwd);
+  free(plan->swizzle_sendreqs_fwd);
   free(plan->ones);
   fftw_free(plan->outerdst);
   fftw_free(plan->outersrc);
@@ -483,7 +492,7 @@ int fft_par_init_swizzle_reqs(fft_par_plan plan)
     err = MPI_Recv_init(
         (char *)plan->outersrc + plan->swizzle_recvdispls[p],
         1, plan->swizzle_recvtypes[p], p, 0, plan->comm,
-        plan->swizzle_recvreqs + p);
+        plan->swizzle_recvreqs_fwd + p);
     if(err != MPI_SUCCESS) goto fail_cancel_recvreqs;
     rc = p;
   }
@@ -494,7 +503,7 @@ int fft_par_init_swizzle_reqs(fft_par_plan plan)
     err = MPI_Send_init(
         (char *)plan->innerdst + plan->swizzle_senddispls[p],
         1, plan->swizzle_sendtypes[p], p, 0, plan->comm,
-        plan->swizzle_sendreqs + p);
+        plan->swizzle_sendreqs_fwd + p);
     if(err != MPI_SUCCESS) goto fail_cancel_sendreqs;
     sc = p;
   }
@@ -508,19 +517,19 @@ int fft_par_init_swizzle_reqs(fft_par_plan plan)
 fail_cancel_sendreqs:
   for(int p = sc; p >= 0; --p) {
     if(err == MPI_SUCCESS) {
-      err = MPI_Request_free(plan->swizzle_sendreqs + p);
+      err = MPI_Request_free(plan->swizzle_sendreqs_fwd + p);
     }
   }
 fail_cancel_recvreqs:
   for(int p = rc; p >= 0; --p) {
     if(err == MPI_SUCCESS) {
-      err = MPI_Request_free(plan->swizzle_recvreqs + p);
+      err = MPI_Request_free(plan->swizzle_recvreqs_fwd + p);
     }
   }
   return err;
 }
 
-int fft_par_execute(fft_par_plan plan)
+int fft_par_execute_fwd(fft_par_plan plan)
 {
   int err = MPI_SUCCESS;
   int procs = 1; for(int d = 0; d < plan->ndims; ++d) procs *= plan->nprocs[d];
@@ -531,7 +540,7 @@ int fft_par_execute(fft_par_plan plan)
       plan->cycle_recvtypes, plan->comm);
   if (err != MPI_SUCCESS) goto fail_immed;
   // Stage two: inner fft
-  fftw_execute(plan->innerplan);
+  fftw_execute(plan->innerplan_fwd);
   // Stage 2.5: finish the fourier transform
   fft_r2c_finish_unpacked(plan->innerdst, plan->ndims, plan->nelems);
   // Stage three: swizzle data
@@ -539,22 +548,23 @@ int fft_par_execute(fft_par_plan plan)
    * wait for a receive to complete and then apply twiddle factors for that
    * processor. Before stage 5, we ensure all sends complete.
    */
-  err = MPI_Startall(procs, plan->swizzle_recvreqs);
+  err = MPI_Startall(procs, plan->swizzle_recvreqs_fwd);
   if(err != MPI_SUCCESS) goto fail_immed;
-  err = MPI_Startall(procs, plan->swizzle_sendreqs);
+  err = MPI_Startall(procs, plan->swizzle_sendreqs_fwd);
   if(err != MPI_SUCCESS) goto fail_immed;
   //Stage four: twiddle factors
   for(int procs_remain = procs; procs_remain > 0; --procs_remain) {
     int idx = MPI_UNDEFINED;
-    err = MPI_Waitany(procs, plan->swizzle_recvreqs, &idx, MPI_STATUSES_IGNORE);
+    err = MPI_Waitany(procs, plan->swizzle_recvreqs_fwd, &idx,
+        MPI_STATUSES_IGNORE);
     if(err != MPI_SUCCESS) goto fail_immed;
     err = apply_twiddle_factors(plan, idx);
     if(err != MPI_SUCCESS) goto fail_immed;
   }
-  err = MPI_Waitall(procs, plan->swizzle_sendreqs, MPI_STATUSES_IGNORE);
+  err = MPI_Waitall(procs, plan->swizzle_sendreqs_fwd, MPI_STATUSES_IGNORE);
   if(err != MPI_SUCCESS) goto fail_immed;
   // Stage five: outer fft
-  fftw_execute(plan->outerplan);
+  fftw_execute(plan->outerplan_fwd);
   // Stage six: rearrange data back to destination
   // This is the reverse of the previous swizzling step
   err = MPI_Alltoallw(plan->outerdst, plan->ones, plan->swizzle_recvdispls,

@@ -192,7 +192,7 @@ status do_parallel_fft(double * const src, double complex * const dst)
     goto fail_immed;
   }
 
-  ret = fft_par_execute(plan);
+  ret = fft_par_execute_fwd(plan);
   if(ret != MPI_SUCCESS) {
     fprintf(stderr, "failure while performing parallel fft\n");
     goto fail_free_plan;

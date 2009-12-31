@@ -84,7 +84,7 @@ fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size, int len,
  *  \param plan The plan to execute
  *  \return The MPI status code
  */
-int fft_par_execute(fft_par_plan);
+int fft_par_execute_fwd(fft_par_plan);
 
 //! Destroy a plan for computing parallel fourier transforms.
 /*! The plans contain buffers and other system resources which need to be

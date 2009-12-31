@@ -212,7 +212,7 @@ int main(int argc, char **argv)
   }
   start_time = MPI_Wtime();
   for(int t = 0; t < TRIALS; ++t) {
-    fft_par_execute(par_plan);
+    fft_par_execute_fwd(par_plan);
   }
   end_time = MPI_Wtime();
   if(rank == 0) {
