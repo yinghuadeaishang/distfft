@@ -89,7 +89,7 @@ int main(int argc, char **argv)
   }
 
   /* Allocate a plan to compute the FFT */
-  fft_par_plan plan = fft_par_plan_r2c_1d(MPI_COMM_WORLD, proc_elems, source,
+  fft_par_plan plan = fft_par_plan_r2c_1d(MPI_COMM_WORLD, proc_elems, 1, source,
       dest, &err);
   if(plan == NULL) {
     fprintf(stderr, "unable to initialize parallel FFT plan\n");

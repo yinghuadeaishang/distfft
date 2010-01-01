@@ -202,10 +202,10 @@ fail_immed:
 }
 
 fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, int ndims, const int *proc_dim,
-    const int *map, const int *size, double *src, complex double *dst,
-    int *errloc);
+    const int VL, const int *map, const int *size, double *src,
+    complex double *dst, int *errloc);
 
-fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int const nelems,
+fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int const nelems, int const vl,
     double * const src, double complex * const dst, int * const errloc)
 {
   fft_par_plan plan = NULL;
@@ -217,7 +217,7 @@ fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int const nelems,
   int *const map = malloc(size*sizeof(int));
   for(int i = 0; i < size; ++i) { map[i] = i; }
 
-  plan = fft_par_plan_r2c_nc(comm, 1, &size, map, &nelems,
+  plan = fft_par_plan_r2c_nc(comm, 1, &size, vl, map, &nelems,
       src, dst, &err);
 
   free(map);
@@ -226,8 +226,9 @@ fail_immed:
   return plan;
 }
 
-fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *const size, double
-    *const src, double complex *const dst, int *const errloc)
+fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *const size,
+    const int vl, double *const src, double complex *const dst,
+    int *const errloc)
 {
   fft_par_plan plan = NULL;
   int ndims;
@@ -263,7 +264,7 @@ fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *const size, double
 
   // Call this helper function to actually initialize, it doesn't assume
   // cartesian topology information is attached to the communicator.
-  plan = fft_par_plan_r2c_nc(comm, ndims, proc_dim, map, size,
+  plan = fft_par_plan_r2c_nc(comm, ndims, proc_dim, vl, map, size,
       src, dst, &err);
 
   /* Resources freed when this function failed */
@@ -281,8 +282,8 @@ fail_immed:
 }
 
 fft_par_plan fft_par_plan_r2c_nc(MPI_Comm comm, const int ndims,
-    const int *const proc_dim, const int *const map, const int *const size,
-    double * const src, double complex * const dst, int *errloc)
+    const int *const proc_dim, const int vl, const int *const map, const int
+    *const size, double * const src, double complex * const dst, int *errloc)
 {
   int rank;
   int err = MPI_Comm_rank(comm, &rank);

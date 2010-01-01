@@ -2,14 +2,16 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <mpi.h>
+#include <string.h>
 #include <math.h>
+#include <mpi.h>
 #include <fftw3.h>
 #include "dSFMT/dSFMT.h"
 #include "fft_par.h"
 #include "fft_ser.h"
 
-const int nelems[2] = {1131, 1113};
+const int nelems[2] = {51, 41};
+const int VL = 3;
 const uint32_t SEED = 42;
 const int TRIALS = 50;
 
@@ -36,6 +38,42 @@ int tile_cartestian(MPI_Comm *cart)
   if(err == MPI_SUCCESS) err = MPI_Comm_free(&comm);
 fail_immed:
   *cart = MPI_COMM_NULL;
+  return err;
+}
+
+// Allocate a master array and initialize it so that it's the same across the
+// cluster. The master array should be freed with fftw_free.
+int create_and_sync_master(MPI_Comm comm, dsfmt_t *rng, double **dst)
+{
+  *dst = NULL;
+  int P[2], per[2], loc[2];
+  int err = MPI_Cart_get(comm, 2, P, per, loc);
+  if(err != MPI_SUCCESS) goto fail_immed;
+  int rank;
+  err = MPI_Comm_rank(comm, &rank);
+  if(err != MPI_SUCCESS) goto fail_immed;
+
+  const int master_len = P[0]*nelems[0]*P[1]*nelems[1];
+  double *master = fftw_malloc(master_len*VL*sizeof(double));
+  if(master == NULL) goto fail_immed;
+
+  /* First processor initializes */
+  if(rank == 0) {
+    for(int i = 0; i < master_len*VL; ++i) {
+      master[i] = dsfmt_genrand_close_open(rng);
+    }
+  }
+
+  /* Synchronize it across the cluster */
+  err = MPI_Bcast(master, master_len*VL, MPI_DOUBLE, 0, comm);
+  if(err != MPI_SUCCESS) goto fail_free_master;
+
+  *dst = master;
+  return err;
+
+fail_free_master:
+  fftw_free(master);
+fail_immed:
   return err;
 }
 
@@ -88,57 +126,112 @@ int main(int argc, char **argv)
   }
   dsfmt_init_gen_rand(prng, SEED + rank);
 
-  /* Allocate the Parallel Source Array and Initialize */
-  double *par_source = fftw_malloc(nelems[0]*nelems[1]*sizeof(double));
-  if(par_source == NULL) {
-    fprintf(stderr, "unable to allocate parallel source array\n");
+  /* Allocate master array and synch across processes */
+  double *master;
+  err = create_and_sync_master(cart, prng, &master);
+  if(master == NULL) {
+    fprintf(stderr, "unable to create master array\n");
     goto die_free_prng;
   }
+
+  /* Create a serial destination array */
+  int P[2], per[2], loc[2];
+  err = MPI_Cart_get(cart, 2, P, per, loc);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to retrieve cartesion topology configuration\n");
+    goto die_free_master;
+  }
+
+  const int masterdim[2] = {P[0]*nelems[0], P[1]*nelems[1]};
+
+  double complex *serial = fftw_malloc(
+      masterdim[0]*masterdim[1]*VL*sizeof(double complex));
+  if(serial == NULL) {
+    fprintf(stderr, "unable to allocate serial destination array\n");
+    goto die_free_master;
+  }
+
+
+  /* Create a serial plan */
+  fftw_plan serial_plan = fftw_plan_many_dft_r2c(2, masterdim, VL,
+      master, NULL, VL, 1, serial, NULL, VL, 1, FFTW_ESTIMATE);
+  if(serial_plan == NULL) {
+    fprintf(stderr, "unable to create serial plan\n");
+    goto die_free_serial;
+  }
+
+  /* Time the serial transform */
+  err = MPI_Barrier(cart);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to synchronize processes to measure serial fft\n");
+    goto die_free_serial_plan;
+  }
+  double start_time = MPI_Wtime();
+  for(int t = 0; t < TRIALS; ++t) {
+    fftw_execute(serial_plan);
+    fft_r2c_finish_packed_vec(serial, 2, masterdim, VL);
+  }
+  double end_time = MPI_Wtime();
+  if(rank == 0) {
+    printf("average serial time: %f\n", (end_time - start_time)/TRIALS);
+  }
+
+  /* Allocate the Parallel Source Array and Initialize */
+  double *par_source = fftw_malloc(nelems[0]*nelems[1]*VL*sizeof(double));
+  if(par_source == NULL) {
+    fprintf(stderr, "unable to allocate parallel source array\n");
+    goto die_free_serial_plan;
+  }
   for(int r = 0; r < nelems[0]; ++r) {
-    for(int c = 0; c < nelems[1]; ++c) {
-      par_source[r*nelems[1] + c] = dsfmt_genrand_close_open(prng);
-    }
+    memcpy(par_source + r*nelems[1]*VL,
+        master + ((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1]*VL,
+        nelems[1]*VL);
   }
 
   /* Allocate the parallel destination array */
   double complex *parallel = fftw_malloc(
-      nelems[0]*nelems[1]*sizeof(double complex));
+      nelems[0]*nelems[1]*VL*sizeof(double complex));
   if(parallel == NULL) {
     fprintf(stderr, "unable to allocate parallel destination array\n");
     goto die_free_par_source;
   }
-  for(int i = 0; i < nelems[0]*nelems[1]; ++i) parallel[i] = 0.0;
 
   /* Create a parallel plan */
-  fft_par_plan par_plan = fft_par_plan_r2c(cart, nelems, 1, par_source,
+  fft_par_plan par_plan = fft_par_plan_r2c(cart, nelems, VL, par_source,
       parallel, &err);
   if(par_plan == NULL) {
     fprintf(stderr, "unable to allocate parallel plan\n");
     goto die_free_parallel;
   }
 
-  /* Before starting time trails, do a run in order to touch the allocated
-   * memory. Memory on modern systems is mapped into address space on a call for
-   * memory, but not mapped to physical memory until it is touched. An untimed
-   * run ensures all the pages are allocated.
-   */
-  fft_par_execute_fwd(par_plan);
   /* Time the parallel transform */
   err = MPI_Barrier(cart);
   if(err != MPI_SUCCESS) {
     fprintf(stderr, "unable to synchronize processors\n");
     goto die_free_par_plan;
   }
-  double start_time = MPI_Wtime();
+  start_time = MPI_Wtime();
   for(int t = 0; t < TRIALS; ++t) {
     fft_par_execute_fwd(par_plan);
   }
-  double end_time = MPI_Wtime();
+  end_time = MPI_Wtime();
   if(rank == 0) {
     printf("average parallel time: %f\n", (end_time - start_time)/TRIALS);
   }
 
-  ret = EXIT_SUCCESS;
+  /* Compare the two transforms to establish equality */
+  double sup = 0.0;
+  for(int r = 0; r < nelems[0]; ++r) {
+    for(int c = 0; c < nelems[1]; ++c) {
+      for(int j = 0; j < VL; ++j) {
+        sup = fmax(sup, cabs(parallel[(r*nelems[1] + c)*VL +j] - serial[
+              (((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1] + c)*VL + j]));
+      }
+    }
+  }
+  if(sup < 1.0e-6) {
+    ret = EXIT_SUCCESS;
+  }
 
   /* Error handling scheme changes here: now we have succeeded unless a cleanup
    * function chokes and dies.
@@ -149,6 +242,12 @@ die_free_parallel:
   fftw_free(parallel);
 die_free_par_source:
   fftw_free(par_source);
+die_free_serial_plan:
+  fftw_destroy_plan(serial_plan);
+die_free_serial:
+  fftw_free(serial);
+die_free_master:
+  fftw_free(master);
 die_free_prng:
   free(prng);
 die_free_cart:

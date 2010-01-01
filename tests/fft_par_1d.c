@@ -172,8 +172,8 @@ fail_immed:
 status do_parallel_fft(double * const src, double complex * const dst)
 {
   status ret = FAILURE;
-  fft_par_plan plan = fft_par_plan_r2c_1d(MPI_COMM_WORLD, proc_elems, src, dst,
-      NULL);
+  fft_par_plan plan = fft_par_plan_r2c_1d(MPI_COMM_WORLD, proc_elems, 1, src,
+      dst, NULL);
   if(plan == NULL) {
     fprintf(stderr, "unable to allocate parallel fft plan\n");
     goto fail_immed;

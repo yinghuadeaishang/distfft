@@ -32,12 +32,13 @@ typedef struct fft_par_plan_s *fft_par_plan;
  *  \param comm The communicator consisting of the nodes over which the data is
  *  distributed.
  *  \param nelems The number of elements on each processor.
+ *  \param vl The vector length of each element.
  *  \param src The source array
  *  \param dst The destination array
  *  \param err The return status from the MPI system.
  *  \return A new plan, or <tt>NULL</tt> if there was an error creating the plan.
  */
-fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int nelems, double *src,
+fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int nelems, int vl, double *src,
      double complex *dst, int *err);
 
 //! Create a plan to compute a distributed discrete fourier transform.
@@ -63,10 +64,13 @@ fft_par_plan fft_par_plan_r2c_1d(MPI_Comm comm, int nelems, double *src,
  *  <i>on each processor.</i>
  *  \param err The return status from the MPI system. If <tt>NULL</tt> is given,
  *  then the MPI return status is not returned.
+ *  \param len The source and destination arrays are interpreted as
+ *  N-dimensional arrays of len-length vectors. For example, if you have a 2D
+ *  grid of three-dimensional values, len = 3.
  *  \return A new plan, or <tt>NULL</tt> if there was an error creating the
  *  plan.
  */
-fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size,
+fft_par_plan fft_par_plan_r2c(MPI_Comm comm, const int *size, int len,
     double *src, double complex *dst, int *err);
 
 //! Execute a plan
