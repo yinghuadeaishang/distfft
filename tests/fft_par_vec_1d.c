@@ -12,7 +12,7 @@
 #include "fft_par.h"
 
 const int proc_elems = 521;
-const int VL = 1;
+const int VL = 13;
 const uint32_t SEED = 42;
 const int TRIALS = 1;
 
@@ -50,19 +50,79 @@ int main(int argc, char **argv)
     fprintf(stderr, "unable to allocate PRNG\n");
     goto die_finalize_mpi;
   }
-  dsfmt_init_gen_rand(prng, SEED + rank);
+  dsfmt_init_gen_rand(prng, SEED);
 
-  const int master_elems = VL * proc_elems * size;
+  const int master_elems = proc_elems * size;
 
-  double *master = malloc(master_elems*sizeof(double));
+  double *const master = fftw_malloc(VL*master_elems*sizeof(double));
   if(master == NULL) {
     fprintf(stderr, "unable to allocate master array\n");
     goto die_free_prng;
   }
-  for(int i = 0; i < master_elems; ++i) {
-    master[i]
+  for(int i = 0; i < master_elems*VL; ++i) {
+    master[i] = 2*dsfmt_genrand_open_close(prng) - 1;
+  }
 
-  free(master);
+  /* Allocate the array holding the serial result */
+  double complex *const serial = fftw_malloc(VL*master_elems*sizeof(*serial));
+  if(serial == NULL) {
+    fprintf(stderr, "unable to allocate serial array\n");
+    goto die_free_master;
+  }
+
+  /* Perform serial transform */
+  fftw_plan serial_plan = fftw_plan_many_dft_r2c(1, &master_elems, VL,
+      master, NULL, VL, 1, serial, NULL, VL, 1, FFTW_ESTIMATE);
+  if(serial_plan == NULL) {
+    fprintf(stderr, "unable to construct forward transform plan\n");
+    goto die_free_serial;
+  }
+
+  /* Perform the serial transform, and complete it */
+  fftw_execute(serial_plan);
+  fft_r2c_1d_vec_finish(serial, master_elems, VL);
+
+  /* Allocate space to hold the parallel transform result */
+  double complex *const parallel = fftw_malloc(
+      proc_elems*VL*sizeof(double complex));
+  if(parallel == NULL) {
+    fprintf(stderr, "unable to allocate space for parallel array\n");
+    goto die_destroy_serial_plan;
+  }
+
+  /* Create the parallel plan */
+  fft_par_plan par_plan = fft_par_plan_r2c_1d(MPI_COMM_WORLD, proc_elems, VL,
+      master + rank*proc_elems*VL, parallel, NULL);
+  if(par_plan == NULL) {
+    fprintf(stderr, "unable to create parallel transform plan\n");
+    goto die_free_parallel;
+  }
+
+  /* Execute the parallel transform */
+  if(fft_par_execute_fwd(par_plan) != MPI_SUCCESS) {
+    fprintf(stderr, "unable to execute parallel transform\n");
+    goto die_destroy_par_plan;
+  }
+
+  /* Compare values */
+  int sup = 0.0;
+  for(int i = 0; i < proc_elems*VL; ++i) {
+    sup = fmax(sup, cabs(serial[rank*proc_elems*VL + i] - parallel[i]));
+  }
+  if(sup < 1.0e-6) {
+    ret = EXIT_SUCCESS;
+  }
+
+die_destroy_par_plan:
+  fft_par_plan_destroy(par_plan);
+die_free_parallel:
+  fftw_free(parallel);
+die_destroy_serial_plan:
+  fftw_destroy_plan(serial_plan);
+die_free_serial:
+  fftw_free(serial);
+die_free_master:
+  fftw_free(master);
 die_free_prng:
   free(prng);
 die_finalize_mpi:

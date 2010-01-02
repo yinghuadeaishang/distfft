@@ -13,6 +13,7 @@
 
 const int proc_elems[2] = {113, 111};
 const uint32_t SEED = 42;
+const int VL = 5;
 const int TRIALS = 5;
 
 typedef enum {
@@ -66,6 +67,20 @@ int main(int argc, char **argv)
     fprintf(stderr, "unable to create cartestian communicator\n");
     goto die_finalize_mpi;
   }
+  err = MPI_Comm_size(cart, &size);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to determine the size of the cartesian grid\n");
+    goto die_free_cart_comm;
+  }
+  err = MPI_Comm_rank(cart, &rank);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to determine the rank in the cartestian grid\n");
+    goto die_free_cart_comm;
+  }
+  if(rank == MPI_COMM_NULL) {
+    ret = EXIT_SUCCESS;
+    goto die_free_cart_comm;
+  }
 
   dsfmt_t *prng = malloc(sizeof(dsfmt_t));
   if(prng == NULL) {
@@ -76,12 +91,12 @@ int main(int argc, char **argv)
 
   int const net_elems = proc_elems[0]*proc_elems[1];
   // Allocate master source array for FFT.
-  double *const master = fftw_malloc(net_elems*sizeof(double));
+  double *const master = fftw_malloc(net_elems*VL*sizeof(double));
   if(master == NULL) {
     fprintf(stderr, "unable to allocate master array\n");
     goto die_free_prng;
   }
-  for(unsigned int i = 0; i < net_elems; ++i) {
+  for(unsigned int i = 0; i < net_elems*VL; ++i) {
     master[i] = dsfmt_genrand_open_close(prng) * 10;
   }
 
@@ -90,22 +105,22 @@ int main(int argc, char **argv)
    * that we should get the original data back, and we use this as a consistency
    * check. We need the original data to compare to.
    */
-  double *const source = fftw_malloc(net_elems*sizeof(double));
+  double *const source = fftw_malloc(net_elems*VL*sizeof(double));
   if(source == NULL) {
     fprintf(stderr, "unable to allocate source array\n");
     goto die_free_master;
   }
-  for(int i = 0; i < net_elems; ++i) source[i] = master[i];
+  for(int i = 0; i < net_elems*VL; ++i) source[i] = master[i];
 
   /* Allocate the destination array */
-  double complex *const dest = fftw_malloc(net_elems*sizeof(double complex));
+  double complex *const dest = fftw_malloc(net_elems*VL*sizeof(double complex));
   if(dest == NULL) {
     fprintf(stderr, "unable to allocate destination array\n");
     goto die_free_source;
   }
 
   /* Allocate a plan to compute the FFT */
-  fft_par_plan plan = fft_par_plan_r2c(cart, proc_elems, 1, source,
+  fft_par_plan plan = fft_par_plan_r2c(cart, proc_elems, VL, source,
       dest, &err);
   if(plan == NULL) {
     fprintf(stderr, "unable to initialize parallel FFT plan\n");
@@ -128,7 +143,7 @@ int main(int argc, char **argv)
 
   /* Compare source to master, use supremum norm */
   int norm = 0.0;
-  for(int i = 0; i < net_elems; ++i) {
+  for(int i = 0; i < net_elems*VL; ++i) {
     /* Each FFT effectively multiplies by sqrt(net_elems*num_procs) */
     norm = fmax(norm, fabs(master[i] - source[i]/net_elems/size));
   }

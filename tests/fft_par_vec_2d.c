@@ -13,69 +13,6 @@
 const int nelems[2] = {51, 41};
 const int VL = 3;
 const uint32_t SEED = 42;
-const int TRIALS = 50;
-
-int tile_cartestian(MPI_Comm *cart)
-{
-  int size;
-  int err = MPI_Comm_size(MPI_COMM_WORLD, &size);
-  if(err != MPI_SUCCESS) goto fail_immed;
-
-  int dims[2] = {0, 0};
-  err = MPI_Dims_create(size, 2, dims);
-  if(err != MPI_SUCCESS) goto fail_immed;
-
-  int periodic[2] = {0, 0};
-  MPI_Comm comm;
-  err = MPI_Cart_create(MPI_COMM_WORLD, 2, dims, periodic, 1, &comm);
-  if(err != MPI_SUCCESS) goto fail_immed;
-
-  /* Successful return */
-  *cart = comm;
-  return err;
-
-  /* Failure */
-  if(err == MPI_SUCCESS) err = MPI_Comm_free(&comm);
-fail_immed:
-  *cart = MPI_COMM_NULL;
-  return err;
-}
-
-// Allocate a master array and initialize it so that it's the same across the
-// cluster. The master array should be freed with fftw_free.
-int create_and_sync_master(MPI_Comm comm, dsfmt_t *rng, double **dst)
-{
-  *dst = NULL;
-  int P[2], per[2], loc[2];
-  int err = MPI_Cart_get(comm, 2, P, per, loc);
-  if(err != MPI_SUCCESS) goto fail_immed;
-  int rank;
-  err = MPI_Comm_rank(comm, &rank);
-  if(err != MPI_SUCCESS) goto fail_immed;
-
-  const int master_len = P[0]*nelems[0]*P[1]*nelems[1];
-  double *master = fftw_malloc(master_len*VL*sizeof(double));
-  if(master == NULL) goto fail_immed;
-
-  /* First processor initializes */
-  if(rank == 0) {
-    for(int i = 0; i < master_len*VL; ++i) {
-      master[i] = dsfmt_genrand_close_open(rng);
-    }
-  }
-
-  /* Synchronize it across the cluster */
-  err = MPI_Bcast(master, master_len*VL, MPI_DOUBLE, 0, comm);
-  if(err != MPI_SUCCESS) goto fail_free_master;
-
-  *dst = master;
-  return err;
-
-fail_free_master:
-  fftw_free(master);
-fail_immed:
-  return err;
-}
 
 int main(int argc, char **argv)
 {
@@ -100,156 +37,181 @@ int main(int argc, char **argv)
     goto die_finalize_mpi;
   }
 
-  MPI_Comm cart;
-  err = tile_cartestian(&cart);
+  /* Create two dimensional cartestian processor layout */
+  int size;
+  err = MPI_Comm_size(MPI_COMM_WORLD, &size);
   if(err != MPI_SUCCESS) {
-    fprintf(stderr, "unable to form cartesian topology.\n");
+    fprintf(stderr, "unable to determine global processor rank\n");
     goto die_finalize_mpi;
   }
-
+  int pdims[2] = {0, 0};
+  err = MPI_Dims_create(size, 2, pdims);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to determine processor layout\n");
+    goto die_finalize_mpi;
+  }
+  int periods[2] = {1,1};
+  MPI_Comm cart;
+  err = MPI_Cart_create(MPI_COMM_WORLD, 2, pdims, periods, 1, &cart);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to create cartestian communicator\n");
+    goto die_finalize_mpi;
+  }
   int rank;
   err = MPI_Comm_rank(cart, &rank);
   if(err != MPI_SUCCESS) {
-    fprintf(stderr, "unable to determinte rank in cartesian topology\n");
-    goto die_finalize_mpi;
-  }
-  /* Die gracefully if we're not needed */
-  if(rank == MPI_COMM_NULL) {
-    ret = EXIT_SUCCESS;
-    goto die_finalize_mpi;
-  }
-
-  dsfmt_t *prng = malloc(sizeof(dsfmt_t));
-  if(prng == NULL) {
-    fprintf(stderr, "unable to allocate PRNG\n");
+    fprintf(stderr, "unable to determine cartestian processor rank\n");
     goto die_free_cart;
   }
-  dsfmt_init_gen_rand(prng, SEED + rank);
+  if(rank == MPI_COMM_NULL) {
+    /* This process is not in the cartestian grid */
+    ret = EXIT_SUCCESS;
+    goto die_free_cart;
+  }
+  err = MPI_Comm_size(cart, &size);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to determine cartestian processor grid size\n");
+    goto die_free_cart;
+  }
 
-  /* Allocate master array and synch across processes */
-  double *master;
-  err = create_and_sync_master(cart, prng, &master);
+  /* Create master source array */
+  const int master_elems = pdims[0]*nelems[0]*pdims[1]*nelems[1];
+  double *const master = fftw_malloc(master_elems*VL*sizeof(double));
   if(master == NULL) {
-    fprintf(stderr, "unable to create master array\n");
-    goto die_free_prng;
+    fprintf(stderr, "unable to allocate master source array\n");
+    goto die_free_cart;
   }
 
-  /* Create a serial destination array */
-  int P[2], per[2], loc[2];
-  err = MPI_Cart_get(cart, 2, P, per, loc);
-  if(err != MPI_SUCCESS) {
-    fprintf(stderr, "unable to retrieve cartesion topology configuration\n");
+  dsfmt_t *const prng = malloc(sizeof(dsfmt_t));
+  if(prng == NULL) {
+    fprintf(stderr, "unable to allocate prng\n");
     goto die_free_master;
   }
-
-  const int masterdim[2] = {P[0]*nelems[0], P[1]*nelems[1]};
-
-  double complex *serial = fftw_malloc(
-      masterdim[0]*masterdim[1]*VL*sizeof(double complex));
-  if(serial == NULL) {
-    fprintf(stderr, "unable to allocate serial destination array\n");
-    goto die_free_master;
+  dsfmt_init_gen_rand(prng, SEED);
+  for(int i = 0; i < master_elems*VL; ++i) {
+    master[i] = 2*(dsfmt_genrand_open_open(prng) - 0.5);
   }
 
-
-  /* Create a serial plan */
-  fftw_plan serial_plan = fftw_plan_many_dft_r2c(2, masterdim, VL,
-      master, NULL, VL, 1, serial, NULL, VL, 1, FFTW_ESTIMATE);
-  if(serial_plan == NULL) {
-    fprintf(stderr, "unable to create serial plan\n");
-    goto die_free_serial;
-  }
-
-  /* Time the serial transform */
-  err = MPI_Barrier(cart);
-  if(err != MPI_SUCCESS) {
-    fprintf(stderr, "unable to synchronize processes to measure serial fft\n");
-    goto die_free_serial_plan;
-  }
-  double start_time = MPI_Wtime();
-  for(int t = 0; t < TRIALS; ++t) {
-    fftw_execute(serial_plan);
-    fft_r2c_finish_packed_vec(serial, 2, masterdim, VL);
-  }
-  double end_time = MPI_Wtime();
-  if(rank == 0) {
-    printf("average serial time: %f\n", (end_time - start_time)/TRIALS);
-  }
-
-  /* Allocate the Parallel Source Array and Initialize */
-  double *par_source = fftw_malloc(nelems[0]*nelems[1]*VL*sizeof(double));
-  if(par_source == NULL) {
-    fprintf(stderr, "unable to allocate parallel source array\n");
-    goto die_free_serial_plan;
-  }
-  for(int r = 0; r < nelems[0]; ++r) {
-    memcpy(par_source + r*nelems[1]*VL,
-        master + ((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1]*VL,
-        nelems[1]*VL);
-  }
-
-  /* Allocate the parallel destination array */
-  double complex *parallel = fftw_malloc(
-      nelems[0]*nelems[1]*VL*sizeof(double complex));
-  if(parallel == NULL) {
-    fprintf(stderr, "unable to allocate parallel destination array\n");
-    goto die_free_par_source;
-  }
-
-  /* Create a parallel plan */
-  fft_par_plan par_plan = fft_par_plan_r2c(cart, nelems, VL, par_source,
-      parallel, &err);
-  if(par_plan == NULL) {
-    fprintf(stderr, "unable to allocate parallel plan\n");
-    goto die_free_parallel;
-  }
-
-  /* Time the parallel transform */
-  err = MPI_Barrier(cart);
-  if(err != MPI_SUCCESS) {
-    fprintf(stderr, "unable to synchronize processors\n");
-    goto die_free_par_plan;
-  }
-  start_time = MPI_Wtime();
-  for(int t = 0; t < TRIALS; ++t) {
-    fft_par_execute_fwd(par_plan);
-  }
-  end_time = MPI_Wtime();
-  if(rank == 0) {
-    printf("average parallel time: %f\n", (end_time - start_time)/TRIALS);
-  }
-
-  /* Compare the two transforms to establish equality */
-  double sup = 0.0;
-  for(int r = 0; r < nelems[0]; ++r) {
-    for(int c = 0; c < nelems[1]; ++c) {
-      for(int j = 0; j < VL; ++j) {
-        sup = fmax(sup, cabs(parallel[(r*nelems[1] + c)*VL +j] - serial[
-              (((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1] + c)*VL + j]));
+  // TODO: Delete this printme code
+  for(int p = 0; p < size; ++p) {
+    if(p == rank) {
+      for(int r = 0; r < pdims[0]*nelems[0]; r++) {
+        printf("master(%d) %d:", rank, r);
+        for(int c = 0; c < pdims[1]*nelems[1]; c++) {
+          printf(" (%g", master[(r*pdims[1]*nelems[1] + c)*VL]);
+          for(int j = 1; j < VL; ++j) {
+            printf(",%g", master[(r*pdims[1]*nelems[1] + c)*VL + j]);
+          }
+          printf(") ");
+        }
+        printf("\n");
       }
     }
+    MPI_Barrier(cart);
+  }
+
+  /* Allocate serial destination array */
+  double complex *const serial = fftw_malloc(
+      master_elems*VL*sizeof(double complex));
+  if(serial == NULL) {
+    fprintf(stderr, "unable to allocate serial destination array\n");
+    goto die_free_prng;
+  }
+  /* Carry out serial transform */
+  int serdim[2] = {pdims[0]*nelems[0], pdims[1]*nelems[1]};
+  fftw_plan splan = fftw_plan_many_dft_r2c(2, serdim, VL, master, NULL, VL, 1,
+      serial, NULL, VL, 1, FFTW_ESTIMATE);
+  if(splan == NULL) {
+    fprintf(stderr, "unable to create serial vector transform plan\n");
+    goto die_free_serial;
+  }
+  fftw_execute(splan);
+
+  /* Create parallel source array and fill it withV the appropriate rows from
+   * master
+   */
+  double *const psrc = fftw_malloc(nelems[0]*nelems[1]*VL*
+      sizeof(double complex));
+  if(psrc == NULL) {
+    fprintf(stderr, "unable to allocate parallel source array\n");
+    goto die_free_splan;
+  }
+  int loc[2];
+  err = MPI_Cart_coords(cart, rank, 2, loc);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to determine processor location\n");
+    goto die_free_psrc;
+  }
+  for(int r = 0; r < nelems[0]; ++r) {
+    memcpy(psrc + r*nelems[1]*VL,
+        master + ((r + loc[0]*nelems[0])*serdim[1] + loc[1]*nelems[1])*VL,
+        nelems[1]*VL*sizeof(double));
+  }
+
+  // // TODO: Delete this printme code
+  // for(int p = 0; p < size; ++p) {
+  //   if(p == rank) {
+  //     for(int r = 0; r < nelems[0]; r++) {
+  //       printf("psrc(%d) %d:", rank, r);
+  //       for(int c = 0; c < nelems[1]; c++) {
+  //         printf(" (%g", psrc[(r*nelems[1] + c)*VL]);
+  //         for(int j = 1; j < VL; ++j) {
+  //           printf(",%g", psrc[(r*nelems[1] + c)*VL + j]);
+  //         }
+  //         printf(") ");
+  //       }
+  //       printf("\n");
+  //     }
+  //   }
+  //   MPI_Barrier(cart);
+  // }
+
+  /* Allocate parallel destination array */
+  double complex *const parallel = fftw_malloc(nelems[0]*nelems[1]*VL*
+      sizeof(double complex));
+  if(parallel == NULL) {
+    fprintf(stderr, "unable to allocate parallel destination array\n");
+    goto die_free_psrc;
+  }
+
+  /* Plan and execute parallel transform */
+  fft_par_plan pplan = fft_par_plan_r2c(cart, nelems, VL, psrc, parallel,
+      &err);
+  if(pplan == NULL || err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to allocate parallel transform plan\n");
+    goto die_free_psrc;
+  }
+
+  err = fft_par_execute_fwd(pplan);
+  if(err != MPI_SUCCESS) {
+    fprintf(stderr, "unable to execute parallel transform\n");
+    goto die_free_pplan;
+  }
+
+  /* Compare the two results using sup norm */
+  double sup = 0.0;
+  for(int r = 0; r < nelems[0]; ++r) {
+    for(int c = 0; c < nelems[1]*VL; ++c) {
+      sup = fmax(sup, cabs(psrc[r*nelems[1]*VL + c] -
+        master[((r + loc[0]*nelems[0])*serdim[1] + loc[1]*nelems[1])*VL + c]));
+      }
   }
   if(sup < 1.0e-6) {
     ret = EXIT_SUCCESS;
   }
 
-  /* Error handling scheme changes here: now we have succeeded unless a cleanup
-   * function chokes and dies.
-   */
-die_free_par_plan:
-  fft_par_plan_destroy(par_plan);
-die_free_parallel:
-  fftw_free(parallel);
-die_free_par_source:
-  fftw_free(par_source);
-die_free_serial_plan:
-  fftw_destroy_plan(serial_plan);
+die_free_pplan:
+  fft_par_plan_destroy(pplan);
+die_free_psrc:
+  fftw_free(psrc);
+die_free_splan:
+  fftw_destroy_plan(splan);
 die_free_serial:
   fftw_free(serial);
-die_free_master:
-  fftw_free(master);
 die_free_prng:
   free(prng);
+die_free_master:
+  fftw_free(master);
 die_free_cart:
   if(err == MPI_SUCCESS) err = MPI_Comm_free(&cart);
 die_finalize_mpi:

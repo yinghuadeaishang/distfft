@@ -5,6 +5,7 @@
 #include <math.h>
 #include <mpi.h>
 #include <fftw3.h>
+#include <string.h>
 #include "dSFMT/dSFMT.h"
 #include "fft_par.h"
 #include "fft_ser.h"
@@ -181,10 +182,9 @@ int main(int argc, char **argv)
     goto die_free_serial_plan;
   }
   for(int r = 0; r < nelems[0]; ++r) {
-    for(int c = 0; c < nelems[1]; ++c) {
-      par_source[r*nelems[1] + c] = master[
-        ((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1] + c];
-    }
+    memcpy(par_source + r*nelems[1],
+      master + ((r + loc[0]*nelems[0])*P[1] + loc[1])*nelems[1],
+      nelems[1]);
   }
 
   /* Allocate the parallel destination array */
