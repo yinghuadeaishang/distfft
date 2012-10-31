@@ -86,7 +86,7 @@ int main(int argc, char **argv)
 
   if(MPI_SUCCESS != MPI_Barrier(MPI_COMM_WORLD)) {
     fprintf(stderr, "unable to synchronize processes.\n");
-    goto die_free_master;
+    goto die_free_serial;
   }
 
   // Compute the serial fft for comparison purposes
